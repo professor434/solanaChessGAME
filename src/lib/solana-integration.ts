@@ -3,7 +3,7 @@ import { Connection, PublicKey, LAMPORTS_PER_SOL, Transaction, SystemProgram } f
 // Treasury wallet for collecting fees
 export const TREASURY_WALLET = '42SoggCv1oXBhNWicmAJir3arYiS2NCMveWpUkixYXzj';
 
-// Solana connection (using devnet for testing)
+// Solana connection (using mainnet)
 const SOLANA_RPC_URL = 'https://broken-purple-breeze.solana-mainnet.quiknode.pro/b087363c02a61ba4c37f9acd5c3c4dcc7b20420f';
 const connection = new Connection(SOLANA_RPC_URL, 'confirmed');
 
@@ -150,24 +150,9 @@ export class SolanaGameManager {
     }
   }
 
+  // Airdrop not available on mainnet - removed
   async requestAirdrop(publicKey: PublicKey, amount: number): Promise<string> {
-    try {
-      const signature = await this.connection.requestAirdrop(
-        publicKey,
-        amount * LAMPORTS_PER_SOL
-      );
-      
-      await this.connection.confirmTransaction(signature);
-      return signature;
-    } catch (error: any) {
-      console.error('Airdrop error:', error);
-      
-      if (error.message?.includes('airdrop request limit')) {
-        throw new Error('Airdrop limit reached. Please try again later or use a different wallet.');
-      }
-      
-      throw new Error('Failed to request airdrop. Please try again.');
-    }
+    throw new Error('Airdrop not available on mainnet. Please purchase SOL from an exchange.');
   }
 
   async sendTransaction(transaction: Transaction): Promise<string> {
