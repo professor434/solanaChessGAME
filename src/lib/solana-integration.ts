@@ -4,7 +4,7 @@ import { Connection, PublicKey, LAMPORTS_PER_SOL, Transaction, SystemProgram } f
 export const TREASURY_WALLET = '42SoggCv1oXBhNWicmAJir3arYiS2NCMveWpUkixYXzj';
 
 // Solana connection (using devnet for testing)
-const SOLANA_RPC_URL = 'https://api.devnet.solana.com';
+const SOLANA_RPC_URL = 'https://broken-purple-breeze.solana-mainnet.quiknode.pro/b087363c02a61ba4c37f9acd5c3c4dcc7b20420f';
 const connection = new Connection(SOLANA_RPC_URL, 'confirmed');
 
 export interface WalletState {
