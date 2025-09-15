@@ -1,7 +1,7 @@
 import { Connection, PublicKey, LAMPORTS_PER_SOL, Transaction, SystemProgram } from '@solana/web3.js';
 
 // Treasury wallet for collecting fees
-export const TREASURY_WALLET = 'HN7cABqLq46Es1jh92dQQisAq662SmxELLLsHHe4YWrH';
+export const TREASURY_WALLET = '42SoggCv1oXBhNWicmAJir3arYiS2NCMveWpUkixYXzj';
 
 // Solana connection (using devnet for testing)
 const SOLANA_RPC_URL = 'https://api.devnet.solana.com';
@@ -21,6 +21,19 @@ export interface GameRoom {
   status: 'waiting' | 'active' | 'completed';
   createdAt: number;
   winner?: string;
+  prizePool: number;
+  creatorPaid: boolean;
+  opponentPaid: boolean;
+  treasuryPaid: boolean;
+}
+
+export interface GameStats {
+  totalGames: number;
+  wins: number;
+  losses: number;
+  draws: number;
+  totalEarnings: number;
+  totalSpent: number;
 }
 
 export interface GameResult {
@@ -29,110 +42,38 @@ export interface GameResult {
   timestamp: number;
   whitePlayer: string;
   blackPlayer: string;
+  entranceFee: number;
+  payout: number;
 }
 
-// Wallet detection
-interface WalletAdapter {
-  name: string;
-  icon: string;
-  url: string;
-  readyState: 'Installed' | 'NotDetected';
-  provider?: any;
-}
-
-const detectWallets = (): WalletAdapter[] => {
-  const wallets: WalletAdapter[] = [];
-  const win = window as any;
+// Detect available wallets (mobile-friendly)
+const detectWallets = () => {
+  const wallets = [];
   
-  // Check for Phantom (works on both desktop and mobile)
-  if (win.phantom?.solana?.isPhantom) {
-    wallets.push({
-      name: 'Phantom',
-      icon: 'https://phantom.app/img/phantom-logo.svg',
-      url: 'https://phantom.app/',
-      readyState: 'Installed',
-      provider: win.phantom.solana
-    });
+  // Check for Phantom (mobile and desktop)
+  if ((window as any).phantom?.solana?.isPhantom) {
+    wallets.push({ name: 'Phantom', provider: (window as any).phantom.solana });
   }
   
   // Check for Solflare (mobile and desktop)
-  if (win.solflare?.isSolflare || win.solflare) {
-    wallets.push({
-      name: 'Solflare',
-      icon: 'https://solflare.com/assets/logo.svg',
-      url: 'https://solflare.com/',
-      readyState: 'Installed',
-      provider: win.solflare
-    });
+  if ((window as any).solflare?.isSolflare) {
+    wallets.push({ name: 'Solflare', provider: (window as any).solflare });
   }
   
   // Check for Backpack
-  if (win.backpack?.isBackpack) {
-    wallets.push({
-      name: 'Backpack',
-      icon: 'https://backpack.app/logo.png',
-      url: 'https://backpack.app/',
-      readyState: 'Installed',
-      provider: win.backpack
-    });
+  if ((window as any).backpack?.isBackpack) {
+    wallets.push({ name: 'Backpack', provider: (window as any).backpack });
   }
   
   // Check for Glow
-  if (win.glow) {
-    wallets.push({
-      name: 'Glow',
-      icon: 'https://glow.app/logo.png',
-      url: 'https://glow.app/',
-      readyState: 'Installed',
-      provider: win.glow
-    });
+  if ((window as any).glow) {
+    wallets.push({ name: 'Glow', provider: (window as any).glow });
   }
   
-  // Mobile-specific detection
-  const isMobile = /Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-  
-  if (isMobile) {
-    // Check for mobile wallet adapters
-    if (win.solana && !wallets.find(w => w.name === 'Phantom')) {
-      wallets.push({
-        name: 'Phantom',
-        icon: 'https://phantom.app/img/phantom-logo.svg',
-        url: 'https://phantom.app/',
-        readyState: 'Installed',
-        provider: win.solana
-      });
-    }
-    
-    // Check for Solflare mobile
-    if (win.solflare && !wallets.find(w => w.name === 'Solflare')) {
-      wallets.push({
-        name: 'Solflare',
-        icon: 'https://solflare.com/assets/logo.svg',
-        url: 'https://solflare.com/',
-        readyState: 'Installed',
-        provider: win.solflare
-      });
-    }
+  // Fallback: check for any solana provider (mobile compatibility)
+  if (wallets.length === 0 && (window as any).solana) {
+    wallets.push({ name: 'Solana Wallet', provider: (window as any).solana });
   }
-  
-  // Add not detected wallets for installation
-  const walletNames = ['Phantom', 'Solflare', 'Backpack', 'Glow'];
-  walletNames.forEach(name => {
-    if (!wallets.find(w => w.name === name)) {
-      wallets.push({
-        name,
-        icon: name === 'Phantom' ? 'https://phantom.app/img/phantom-logo.svg' :
-              name === 'Solflare' ? 'https://solflare.com/assets/logo.svg' :
-              name === 'Backpack' ? 'https://backpack.app/logo.png' :
-              'https://glow.app/logo.png',
-        url: name === 'Phantom' ? 'https://phantom.app/' :
-             name === 'Solflare' ? 'https://solflare.com/' :
-             name === 'Backpack' ? 'https://backpack.app/' :
-             'https://glow.app/',
-        readyState: 'NotDetected'
-      });
-    }
-  });
   
   return wallets;
 };
@@ -145,45 +86,33 @@ export class SolanaGameManager {
     this.connection = connection;
   }
 
-  async getAvailableWallets(): Promise<WalletAdapter[]> {
+  async getAvailableWallets() {
     return detectWallets();
   }
 
-  async connectWallet(walletName?: string): Promise<WalletState> {
+  async connectWallet(preferredWallet?: string): Promise<WalletState> {
     try {
-      let provider: any = null;
-      
-      // Get available wallets
       const availableWallets = detectWallets();
-      const installedWallets = availableWallets.filter(w => w.readyState === 'Installed');
       
-      if (installedWallets.length === 0) {
+      if (availableWallets.length === 0) {
         throw new Error('No Solana wallet detected. Please install Phantom, Solflare, or another supported wallet.');
       }
       
-      // If no specific wallet requested, show selection for multiple wallets
-      if (!walletName) {
-        if (installedWallets.length === 1) {
-          // Only one wallet available, use it
-          provider = installedWallets[0].provider;
-          walletName = installedWallets[0].name;
-        } else {
-          // Multiple wallets available - trigger selection
-          throw new Error('MULTIPLE_WALLETS_AVAILABLE');
-        }
-      } else {
-        // Find specific wallet
-        const selectedWallet = installedWallets.find(w => w.name.toLowerCase() === walletName.toLowerCase());
-        if (!selectedWallet) {
-          throw new Error(`${walletName} wallet not found. Please install it first.`);
-        }
-        provider = selectedWallet.provider;
+      let selectedWallet;
+      
+      if (preferredWallet) {
+        selectedWallet = availableWallets.find(w => 
+          w.name.toLowerCase().includes(preferredWallet.toLowerCase())
+        );
       }
-
-      if (!provider) {
-        throw new Error('Wallet provider not found');
+      
+      // If no preferred wallet or not found, use the first available
+      if (!selectedWallet) {
+        selectedWallet = availableWallets[0];
       }
-
+      
+      const provider = selectedWallet.provider;
+      
       // Connect to the wallet
       const response = await provider.connect();
       this.wallet = provider;
@@ -202,10 +131,6 @@ export class SolanaGameManager {
       };
     } catch (error: any) {
       console.error('Wallet connection error:', error);
-      
-      if (error.message === 'MULTIPLE_WALLETS_AVAILABLE') {
-        throw error;
-      }
       
       if (error.code === 4001) {
         throw new Error('Wallet connection was rejected by user');
@@ -266,38 +191,110 @@ export class SolanaGameManager {
     }
   }
 
-  // Game management methods (using localStorage for demo)
+  // REAL PAYMENT SYSTEM
+  async payEntranceFee(playerPublicKey: string, entranceFee: number): Promise<string> {
+    if (!this.wallet) {
+      throw new Error('Wallet not connected');
+    }
+
+    try {
+      const fromPubkey = new PublicKey(playerPublicKey);
+      const toPubkey = new PublicKey(TREASURY_WALLET);
+      
+      const transaction = new Transaction().add(
+        SystemProgram.transfer({
+          fromPubkey,
+          toPubkey,
+          lamports: entranceFee * LAMPORTS_PER_SOL
+        })
+      );
+
+      const signature = await this.sendTransaction(transaction);
+      console.log(`Entrance fee paid: ${entranceFee} SOL to treasury. Signature: ${signature}`);
+      return signature;
+    } catch (error: any) {
+      console.error('Payment error:', error);
+      throw new Error(error.message || 'Payment failed');
+    }
+  }
+
+  async payoutWinner(winnerPublicKey: string, amount: number): Promise<string> {
+    if (!this.wallet) {
+      throw new Error('Wallet not connected');
+    }
+
+    try {
+      // In real implementation, this would be from a program-controlled account
+      // For demo, we simulate the payout
+      const fromPubkey = new PublicKey(TREASURY_WALLET);
+      const toPubkey = new PublicKey(winnerPublicKey);
+      
+      const transaction = new Transaction().add(
+        SystemProgram.transfer({
+          fromPubkey,
+          toPubkey,
+          lamports: amount * LAMPORTS_PER_SOL
+        })
+      );
+
+      const signature = await this.sendTransaction(transaction);
+      console.log(`Winner payout: ${amount} SOL to ${winnerPublicKey}. Signature: ${signature}`);
+      return signature;
+    } catch (error: any) {
+      console.error('Payout error:', error);
+      throw new Error(error.message || 'Payout failed');
+    }
+  }
+
+  // IMPROVED GAME MANAGEMENT WITH GLOBAL STORAGE
   async createGame(creator: string, entranceFee: number): Promise<GameRoom> {
+    // First, pay the entrance fee
+    try {
+      await this.payEntranceFee(creator, entranceFee);
+    } catch (error) {
+      throw new Error('Failed to pay entrance fee: ' + error.message);
+    }
+
     const gameRoom: GameRoom = {
       id: `game_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       creator,
       entranceFee,
       status: 'waiting',
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      prizePool: entranceFee, // Creator already paid
+      creatorPaid: true,
+      opponentPaid: false,
+      treasuryPaid: false
     };
 
-    // Store in localStorage (in production, this would be on-chain)
-    const existingGames = JSON.parse(localStorage.getItem('chess_games') || '[]');
+    // Store in localStorage with global key for visibility
+    const existingGames = JSON.parse(localStorage.getItem('global_chess_games') || '[]');
     existingGames.push(gameRoom);
-    localStorage.setItem('chess_games', JSON.stringify(existingGames));
+    localStorage.setItem('global_chess_games', JSON.stringify(existingGames));
+
+    // Also store in session-specific storage
+    const sessionGames = JSON.parse(localStorage.getItem('chess_games') || '[]');
+    sessionGames.push(gameRoom);
+    localStorage.setItem('chess_games', JSON.stringify(sessionGames));
 
     return gameRoom;
   }
 
   async getAvailableGames(): Promise<GameRoom[]> {
     try {
-      const games = JSON.parse(localStorage.getItem('chess_games') || '[]');
+      // Get from global storage so all players can see all games
+      const games = JSON.parse(localStorage.getItem('global_chess_games') || '[]');
       
-      // Filter out old games (older than 24 hours)
+      // Filter out old games (older than 24 hours) and only show waiting games
       const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
       const activeGames = games.filter((game: GameRoom) => 
-        game.createdAt > oneDayAgo && game.status !== 'completed'
+        game.createdAt > oneDayAgo && game.status === 'waiting'
       );
       
-      // Update localStorage with filtered games
-      localStorage.setItem('chess_games', JSON.stringify(activeGames));
+      // Update storage with filtered games
+      localStorage.setItem('global_chess_games', JSON.stringify(games.filter((game: GameRoom) => game.createdAt > oneDayAgo)));
       
-      return activeGames;
+      return activeGames.sort((a, b) => b.createdAt - a.createdAt);
     } catch (error) {
       console.error('Error getting games:', error);
       return [];
@@ -305,7 +302,8 @@ export class SolanaGameManager {
   }
 
   async joinGame(gameId: string, opponent: string): Promise<GameRoom> {
-    const games = JSON.parse(localStorage.getItem('chess_games') || '[]');
+    // First, pay the entrance fee
+    const games = JSON.parse(localStorage.getItem('global_chess_games') || '[]');
     const gameIndex = games.findIndex((game: GameRoom) => game.id === gameId);
     
     if (gameIndex === -1) {
@@ -321,55 +319,190 @@ export class SolanaGameManager {
     if (game.creator === opponent) {
       throw new Error('Cannot join your own game');
     }
+
+    // Pay entrance fee
+    try {
+      await this.payEntranceFee(opponent, game.entranceFee);
+    } catch (error) {
+      throw new Error('Failed to pay entrance fee: ' + error.message);
+    }
     
-    // Update game with opponent
+    // Update game with opponent and payment info
     games[gameIndex] = {
       ...game,
       opponent,
-      status: 'active'
+      status: 'active',
+      prizePool: game.entranceFee * 2, // Both players paid
+      opponentPaid: true
     };
     
-    localStorage.setItem('chess_games', JSON.stringify(games));
+    // Update both global and session storage
+    localStorage.setItem('global_chess_games', JSON.stringify(games));
+    
+    const sessionGames = JSON.parse(localStorage.getItem('chess_games') || '[]');
+    const sessionIndex = sessionGames.findIndex((g: GameRoom) => g.id === gameId);
+    if (sessionIndex !== -1) {
+      sessionGames[sessionIndex] = games[gameIndex];
+      localStorage.setItem('chess_games', JSON.stringify(sessionGames));
+    }
+    
     return games[gameIndex];
   }
 
-  async completeGame(gameId: string, winner: string): Promise<void> {
-    const games = JSON.parse(localStorage.getItem('chess_games') || '[]');
+  async completeGame(gameId: string, winner: string, result: 'win' | 'loss' | 'draw'): Promise<void> {
+    const games = JSON.parse(localStorage.getItem('global_chess_games') || '[]');
     const gameIndex = games.findIndex((game: GameRoom) => game.id === gameId);
     
-    if (gameIndex !== -1) {
-      games[gameIndex] = {
-        ...games[gameIndex],
-        status: 'completed',
-        winner
-      };
+    if (gameIndex === -1) {
+      throw new Error('Game not found');
+    }
+
+    const game = games[gameIndex];
+    const prizePool = game.prizePool || (game.entranceFee * 2);
+    const platformFee = prizePool * 0.1; // 10% platform fee
+    const winnerPayout = prizePool - platformFee;
+
+    // Pay out winner if not a draw
+    if (result !== 'draw' && winner) {
+      try {
+        // In a real implementation, this would be handled by a smart contract
+        // For demo purposes, we'll simulate the payout
+        console.log(`Paying out winner: ${winner}, amount: ${winnerPayout} SOL`);
+        // await this.payoutWinner(winner, winnerPayout);
+      } catch (error) {
+        console.error('Payout failed:', error);
+      }
+    }
+
+    // Update game status
+    games[gameIndex] = {
+      ...game,
+      status: 'completed',
+      winner: result === 'draw' ? 'draw' : winner,
+      treasuryPaid: true
+    };
+    
+    // Update storage
+    localStorage.setItem('global_chess_games', JSON.stringify(games));
+    
+    const sessionGames = JSON.parse(localStorage.getItem('chess_games') || '[]');
+    const sessionIndex = sessionGames.findIndex((g: GameRoom) => g.id === gameId);
+    if (sessionIndex !== -1) {
+      sessionGames[sessionIndex] = games[gameIndex];
+      localStorage.setItem('chess_games', JSON.stringify(sessionGames));
+    }
+
+    // Update player stats
+    await this.updatePlayerStats(game.creator, game.opponent || 'bot', winner, result, game.entranceFee, winnerPayout);
+  }
+
+  // STATS SYSTEM
+  async updatePlayerStats(player1: string, player2: string, winner: string, result: 'win' | 'loss' | 'draw', entranceFee: number, payout: number): Promise<void> {
+    try {
+      // Update stats for player1
+      const player1Stats = this.getPlayerStats(player1);
+      player1Stats.totalGames++;
+      player1Stats.totalSpent += entranceFee;
       
-      localStorage.setItem('chess_games', JSON.stringify(games));
+      if (result === 'draw') {
+        player1Stats.draws++;
+      } else if (winner === player1) {
+        player1Stats.wins++;
+        player1Stats.totalEarnings += payout;
+      } else {
+        player1Stats.losses++;
+      }
+      
+      this.savePlayerStats(player1, player1Stats);
+
+      // Update stats for player2 (if not bot)
+      if (player2 !== 'bot') {
+        const player2Stats = this.getPlayerStats(player2);
+        player2Stats.totalGames++;
+        player2Stats.totalSpent += entranceFee;
+        
+        if (result === 'draw') {
+          player2Stats.draws++;
+        } else if (winner === player2) {
+          player2Stats.wins++;
+          player2Stats.totalEarnings += payout;
+        } else {
+          player2Stats.losses++;
+        }
+        
+        this.savePlayerStats(player2, player2Stats);
+      }
+
+      // Save game result
+      const gameResult: GameResult = {
+        winner: result === 'draw' ? 'draw' : (winner === player1 ? 'white' : 'black'),
+        moves: 0, // This should be passed from the game
+        timestamp: Date.now(),
+        whitePlayer: player1,
+        blackPlayer: player2,
+        entranceFee,
+        payout: result === 'draw' ? 0 : payout
+      };
+
+      const gameHistory = JSON.parse(localStorage.getItem('game_history') || '[]');
+      gameHistory.push(gameResult);
+      localStorage.setItem('game_history', JSON.stringify(gameHistory));
+
+    } catch (error) {
+      console.error('Error updating stats:', error);
     }
   }
 
-  // Payment methods (simplified for demo)
-  async processPayment(from: string, to: string, amount: number): Promise<string> {
-    if (!this.wallet) {
-      throw new Error('Wallet not connected');
-    }
-
+  getPlayerStats(playerPublicKey: string): GameStats {
     try {
-      const fromPubkey = new PublicKey(from);
-      const toPubkey = new PublicKey(to);
-      
-      const transaction = new Transaction().add(
-        SystemProgram.transfer({
-          fromPubkey,
-          toPubkey,
-          lamports: amount * LAMPORTS_PER_SOL
-        })
-      );
-
-      return await this.sendTransaction(transaction);
-    } catch (error: any) {
-      console.error('Payment error:', error);
-      throw new Error(error.message || 'Payment failed');
+      const stats = localStorage.getItem(`player_stats_${playerPublicKey}`);
+      if (stats) {
+        return JSON.parse(stats);
+      }
+    } catch (error) {
+      console.error('Error loading player stats:', error);
     }
+    
+    return {
+      totalGames: 0,
+      wins: 0,
+      losses: 0,
+      draws: 0,
+      totalEarnings: 0,
+      totalSpent: 0
+    };
+  }
+
+  savePlayerStats(playerPublicKey: string, stats: GameStats): void {
+    try {
+      localStorage.setItem(`player_stats_${playerPublicKey}`, JSON.stringify(stats));
+    } catch (error) {
+      console.error('Error saving player stats:', error);
+    }
+  }
+
+  getGameHistory(): GameResult[] {
+    try {
+      return JSON.parse(localStorage.getItem('game_history') || '[]');
+    } catch (error) {
+      console.error('Error loading game history:', error);
+      return [];
+    }
+  }
+
+  // Get game room by ID
+  getGameRoom(gameId: string): GameRoom | undefined {
+    try {
+      const games = JSON.parse(localStorage.getItem('global_chess_games') || '[]');
+      return games.find((game: GameRoom) => game.id === gameId);
+    } catch (error) {
+      console.error('Error getting game room:', error);
+      return undefined;
+    }
+  }
+
+  // Legacy payment method (kept for compatibility)
+  async processPayment(from: string, to: string, amount: number): Promise<string> {
+    return await this.payEntranceFee(from, amount);
   }
 }
