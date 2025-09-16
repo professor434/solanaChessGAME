@@ -5,7 +5,7 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
-import { Wallet, Plus, Users, Crown, TrendingUp, Trophy, Gamepad2, Bot, Zap, Target, Brain, Medal, Star, Smartphone, RefreshCw } from 'lucide-react';
+import { Wallet, Plus, Users, Crown, TrendingUp, Trophy, Gamepad2, Bot, Zap, Target, Brain, Medal, Star, Smartphone, RefreshCw, DollarSign } from 'lucide-react';
 import { toast } from 'sonner';
 import WalletConnect from '@/components/WalletConnect';
 import ChessGame from '@/components/ChessGame';
@@ -38,7 +38,6 @@ export default function Index() {
       const mobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
                     window.innerWidth <= 768;
       setIsMobile(mobile);
-      console.log(`📱 Device detection: ${mobile ? 'Mobile' : 'Desktop'}`);
     };
     
     checkMobile();
@@ -69,7 +68,7 @@ export default function Index() {
     };
 
     loadGames();
-    const interval = setInterval(loadGames, isMobile ? 15000 : 10000); // Longer interval on mobile
+    const interval = setInterval(loadGames, isMobile ? 15000 : 10000);
     return () => clearInterval(interval);
   }, [solanaManager, walletState.connected, isMobile]);
 
@@ -88,7 +87,6 @@ export default function Index() {
     if (newWalletState.connected) {
       toast.success('Wallet connected successfully!');
       
-      // Initialize tournament if needed
       const tournament = rankingSystem.getCurrentTournament();
       if (!tournament) {
         rankingSystem.initializeAnnualTournament();
@@ -115,19 +113,13 @@ export default function Index() {
 
     setIsLoading(true);
     try {
-      toast.info('Creating game and processing payment...', { duration: 3000 });
+      toast.info('Creating game and paying entrance fee...', { duration: 3000 });
       
       const gameRoom = await solanaManager.createGameWithWallet(walletState.publicKey, fee);
       
-      // Verify the game is properly signed
-      const isSigned = solanaManager.isGameFullySigned(gameRoom.id);
-      if (!isSigned) {
-        throw new Error('Game contract not properly signed');
-      }
-      
       setCurrentGame(gameRoom);
       setGameMode('multiplayer');
-      toast.success('🎮 Game created and contract signed! Waiting for opponent...');
+      toast.success(`🎮 Game created! You paid ${fee} SOL. Waiting for opponent to pay same amount and join!`);
     } catch (error: any) {
       console.error('Error creating game:', error);
       toast.error(error.message || 'Failed to create game');
@@ -142,21 +134,26 @@ export default function Index() {
       return;
     }
 
+    const game = availableGames.find(g => g.id === gameId);
+    if (!game) {
+      toast.error('Game not found');
+      return;
+    }
+
+    if (walletState.balance < game.entranceFee + 0.001) {
+      toast.error(`Insufficient balance. You need ${(game.entranceFee + 0.001).toFixed(4)} SOL to join this game.`);
+      return;
+    }
+
     setIsLoading(true);
     try {
-      toast.info('Joining game and processing payment...', { duration: 3000 });
+      toast.info(`Joining game and paying ${game.entranceFee} SOL entrance fee...`, { duration: 3000 });
       
       const gameRoom = await solanaManager.joinGame(gameId, walletState.publicKey);
       
-      // Verify both players have signed
-      const isSigned = solanaManager.isGameFullySigned(gameRoom.id);
-      if (!isSigned) {
-        throw new Error('Game contracts not fully signed');
-      }
-      
       setCurrentGame(gameRoom);
       setGameMode('multiplayer');
-      toast.success('🎮 Joined game and contract signed! Game starting...');
+      toast.success(`🎮 Joined game! You paid ${game.entranceFee} SOL. Total pot: ${gameRoom.totalPot} SOL. Winner gets ${gameRoom.winnerPrize} SOL (90%)!`);
     } catch (error: any) {
       console.error('Error joining game:', error);
       toast.error(error.message || 'Failed to join game');
@@ -173,23 +170,24 @@ export default function Index() {
 
     setBotDifficulty(difficulty);
     setGameMode('bot');
-    // Create a dummy game room for bot games
     setCurrentGame({
       id: `bot_${Date.now()}`,
       creator: walletState.publicKey,
       opponent: 'bot',
       entranceFee: 0,
+      totalPot: 0,
+      winnerPrize: 0,
+      platformFee: 0,
       status: 'active',
       winner: null,
       createdAt: Date.now(),
-      creatorSigned: true,
-      opponentSigned: true
+      creatorPaid: true,
+      opponentPaid: true
     });
     toast.success(`Starting ${difficulty} bot game!`);
   };
 
   const handleGameEnd = (result?: { winner: 'white' | 'black' | 'draw'; playerColor: 'white' | 'black' }) => {
-    // Update ranking if it was a bot game
     if (currentGame?.opponent === 'bot' && walletState.publicKey && result) {
       const gameResult = result.winner === 'draw' ? 'draw' : 
                         (result.winner === result.playerColor ? 'win' : 'loss');
@@ -197,14 +195,13 @@ export default function Index() {
       const { player, newAchievements, rankUp } = rankingSystem.updatePlayerAfterGame(
         walletState.publicKey,
         gameResult,
-        1000, // Bot ELO
-        0, // No earnings from bot games
-        0  // No spending on bot games
+        1000,
+        0,
+        0
       );
       
       setPlayerRank(player);
       
-      // Show achievement notifications
       if (newAchievements.length > 0) {
         newAchievements.forEach(achievementId => {
           const achievement = rankingSystem.getAchievementInfo(achievementId);
@@ -214,19 +211,17 @@ export default function Index() {
         });
       }
       
-      // Show rank up notification
       if (rankUp) {
         toast.success(`🎉 Rank Up! You are now ${player.currentRank}!`);
       }
     } else if (currentGame?.opponent !== 'bot' && currentGame) {
-      // Complete multiplayer game
       if (result && walletState.publicKey) {
         const winner = result.winner === result.playerColor ? walletState.publicKey : 
                       (currentGame.creator === walletState.publicKey ? currentGame.opponent! : currentGame.creator);
         
         if (result.winner !== 'draw') {
           solanaManager.completeGame(currentGame.id, winner);
-          toast.success('🎉 Game completed! Winnings processed.');
+          toast.success(`🎉 Game completed! Winner receives ${currentGame.winnerPrize} SOL (90% of ${currentGame.totalPot} SOL pot)!`);
         }
       }
     }
@@ -265,7 +260,6 @@ export default function Index() {
     return solanaManager.getPlayerStats(walletState.publicKey);
   };
 
-  // If in a game, show the chess game
   if (currentGame) {
     return (
       <ChessGame
@@ -278,7 +272,6 @@ export default function Index() {
     );
   }
 
-  // If showing rankings, show ranking display
   if (showRankings && walletState.publicKey) {
     return (
       <RankingDisplay
@@ -307,7 +300,7 @@ export default function Index() {
             )}
           </div>
           <p className="text-lg text-gray-600 max-w-2xl mx-auto">
-            Play chess with real SOL stakes or practice against AI bots! {isMobile ? 'Mobile optimized!' : 'Climb the ranks and win annual tournaments!'}
+            Both players pay entrance fee! Winner gets 90% of total pot, platform keeps 10%
           </p>
         </div>
 
@@ -350,7 +343,6 @@ export default function Index() {
                   </div>
                 </CardHeader>
                 <CardContent>
-                  {/* Rank Display */}
                   {playerRank && (
                     <div className="mb-4 p-4 bg-gradient-to-r from-blue-50 to-purple-50 rounded-lg">
                       <div className="flex items-center justify-between mb-2">
@@ -380,7 +372,6 @@ export default function Index() {
                         </div>
                       </div>
                       
-                      {/* Achievements Preview */}
                       {playerRank.achievements.length > 0 && (
                         <div className="flex flex-wrap gap-1 mt-2">
                           {playerRank.achievements.slice(0, 5).map((achievementId) => {
@@ -445,7 +436,6 @@ export default function Index() {
                 </CardHeader>
                 <CardContent>
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    {/* Easy Bot */}
                     <div className="border rounded-lg p-4 text-center hover:bg-green-50 transition-colors">
                       <div className="flex items-center justify-center mb-3">
                         <div className="p-2 bg-green-100 rounded-full">
@@ -462,7 +452,6 @@ export default function Index() {
                       </Button>
                     </div>
 
-                    {/* Medium Bot */}
                     <div className="border rounded-lg p-4 text-center hover:bg-yellow-50 transition-colors">
                       <div className="flex items-center justify-center mb-3">
                         <div className="p-2 bg-yellow-100 rounded-full">
@@ -479,7 +468,6 @@ export default function Index() {
                       </Button>
                     </div>
 
-                    {/* Hard Bot */}
                     <div className="border rounded-lg p-4 text-center hover:bg-red-50 transition-colors">
                       <div className="flex items-center justify-center mb-3">
                         <div className="p-2 bg-red-100 rounded-full">
@@ -509,12 +497,12 @@ export default function Index() {
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2">
                     <Plus className="h-5 w-5" />
-                    Create New Game (Real SOL Stakes)
+                    Create New Game (Both Players Pay)
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="space-y-2">
-                    <Label htmlFor="entrance-fee">Entrance Fee (SOL)</Label>
+                    <Label htmlFor="entrance-fee">Entrance Fee (SOL) - Per Player</Label>
                     <Input
                       id="entrance-fee"
                       type="number"
@@ -533,22 +521,30 @@ export default function Index() {
 
                   <div className="space-y-2">
                     <div className="flex justify-between text-sm">
-                      <span>Prize Pool:</span>
-                      <span className="font-medium">{(parseFloat(entranceFee || '0') * 2).toFixed(4)} SOL</span>
+                      <span>You Pay:</span>
+                      <span className="font-medium text-red-600">{parseFloat(entranceFee || '0').toFixed(4)} SOL</span>
                     </div>
                     <div className="flex justify-between text-sm">
-                      <span>Winner Gets:</span>
-                      <span className="font-medium text-green-600">{(parseFloat(entranceFee || '0') * 1.8).toFixed(4)} SOL</span>
+                      <span>Opponent Pays:</span>
+                      <span className="font-medium text-red-600">{parseFloat(entranceFee || '0').toFixed(4)} SOL</span>
                     </div>
                     <div className="flex justify-between text-sm">
-                      <span>Platform Fee:</span>
-                      <span className="font-medium text-gray-500">{(parseFloat(entranceFee || '0') * 0.2).toFixed(4)} SOL</span>
+                      <span>Total Pot:</span>
+                      <span className="font-medium text-blue-600">{(parseFloat(entranceFee || '0') * 2).toFixed(4)} SOL</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span>Winner Gets (90%):</span>
+                      <span className="font-medium text-green-600">{(parseFloat(entranceFee || '0') * 2 * 0.9).toFixed(4)} SOL</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span>Platform Fee (10%):</span>
+                      <span className="font-medium text-gray-500">{(parseFloat(entranceFee || '0') * 2 * 0.1).toFixed(4)} SOL</span>
                     </div>
                   </div>
 
                   <div className="bg-blue-50 p-3 rounded-lg">
                     <div className="text-sm text-blue-800">
-                      🔐 <strong>Secure Escrow:</strong> Your SOL is held in escrow until game completion
+                      🏦 <strong>Fair Play:</strong> Both players pay same amount, winner gets 90% of total pot
                     </div>
                   </div>
 
@@ -557,7 +553,7 @@ export default function Index() {
                     disabled={isLoading || !entranceFee || parseFloat(entranceFee) <= 0}
                     className="w-full bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700"
                   >
-                    {isLoading ? 'Creating & Signing...' : 'Create & Sign Game'}
+                    {isLoading ? 'Creating & Paying...' : 'Create Game & Pay Fee'}
                   </Button>
                 </CardContent>
               </Card>
@@ -595,15 +591,13 @@ export default function Index() {
                           <div className="flex items-center justify-between mb-2">
                             <div className="flex items-center gap-2">
                               <Trophy className="h-4 w-4 text-yellow-600" />
-                              <span className="font-medium">{game.entranceFee} SOL</span>
-                              {(game as any).creatorSigned && (
-                                <Badge variant="secondary" className="text-xs bg-green-100 text-green-800">
-                                  ✓ Signed
-                                </Badge>
-                              )}
+                              <span className="font-medium">Pay {game.entranceFee} SOL</span>
+                              <Badge variant="secondary" className="text-xs bg-blue-100 text-blue-800">
+                                Win {game.winnerPrize} SOL
+                              </Badge>
                             </div>
-                            <Badge variant="secondary">
-                              Prize: {(game.entranceFee * 1.8).toFixed(4)} SOL
+                            <Badge variant="secondary" className="text-orange-600">
+                              Both Pay Same
                             </Badge>
                           </div>
                           
@@ -615,8 +609,9 @@ export default function Index() {
                               size="sm"
                               onClick={() => handleJoinGame(game.id)}
                               disabled={isLoading || game.creator === walletState.publicKey}
+                              className="bg-blue-600 hover:bg-blue-700"
                             >
-                              {game.creator === walletState.publicKey ? 'Your Game' : 'Join & Sign'}
+                              {game.creator === walletState.publicKey ? 'Your Game' : `Pay ${game.entranceFee} SOL & Join`}
                             </Button>
                           </div>
                         </div>
@@ -631,7 +626,7 @@ export default function Index() {
 
         {/* Footer */}
         <div className="text-center mt-12 text-sm text-gray-500">
-          <p>Powered by Solana • {walletState.connected ? 'Secure escrow contracts with real SOL stakes' : 'Real SOL transactions on mainnet'}</p>
+          <p>Powered by Solana • {walletState.connected ? 'Both players pay entrance fee, winner gets 90% of total pot, platform keeps 10%' : 'Real SOL transactions on mainnet'}</p>
           {isMobile && <p className="mt-1">📱 Mobile optimized for iOS and Android</p>}
         </div>
       </div>
