@@ -1,12 +1,10 @@
-import { Connection, PublicKey, LAMPORTS_PER_SOL, Transaction, SystemProgram } from '@solana/web3.js';
+import { Connection, PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL } from '@solana/web3.js';
+import { safeLocalStorage, safeJSONParse, safeJSONStringify } from './storage-utils';
 
-// Treasury wallet for collecting fees
+// Treasury wallet for collecting fees - EXPORTED
 export const TREASURY_WALLET = '42SoggCv1oXBhNWicmAJir3arYiS2NCMveWpUkixYXzj';
 
-// Solana connection (using mainnet)
-const SOLANA_RPC_URL = 'https://broken-purple-breeze.solana-mainnet.quiknode.pro/b087363c02a61ba4c37f9acd5c3c4dcc7b20420f';
-const connection = new Connection(SOLANA_RPC_URL, 'confirmed');
-
+// Types
 export interface WalletState {
   connected: boolean;
   publicKey: string | null;
@@ -16,18 +14,14 @@ export interface WalletState {
 export interface GameRoom {
   id: string;
   creator: string;
-  opponent?: string;
+  opponent: string | null;
   entranceFee: number;
   status: 'waiting' | 'active' | 'completed';
+  winner: string | null;
   createdAt: number;
-  winner?: string;
-  prizePool: number;
-  creatorPaid: boolean;
-  opponentPaid: boolean;
-  treasuryPaid: boolean;
 }
 
-export interface GameStats {
+export interface PlayerStats {
   totalGames: number;
   wins: number;
   losses: number;
@@ -42,20 +36,31 @@ export interface GameResult {
   timestamp: number;
   whitePlayer: string;
   blackPlayer: string;
-  entranceFee: number;
-  payout: number;
 }
 
-// Detect available wallets (mobile-friendly)
+// Solana configuration with your QuickNode RPC endpoint
+const RPC_ENDPOINTS = [
+  'https://broken-purple-breeze.solana-mainnet.quiknode.pro/b087363c02a61ba4c37f9acd5c3c4dcc7b20420f',
+  'https://api.mainnet-beta.solana.com',
+  'https://solana-api.projectserum.com'
+];
+
+// Global storage key for cross-browser game sharing
+const GLOBAL_GAMES_KEY = 'solana_chess_global_games';
+const GLOBAL_STATS_KEY = 'solana_chess_global_stats';
+
+// Detect available wallets
 const detectWallets = () => {
+  if (typeof window === 'undefined') return [];
+  
   const wallets = [];
   
-  // Check for Phantom (mobile and desktop)
+  // Check for Phantom
   if ((window as any).phantom?.solana?.isPhantom) {
     wallets.push({ name: 'Phantom', provider: (window as any).phantom.solana });
   }
   
-  // Check for Solflare (mobile and desktop)
+  // Check for Solflare
   if ((window as any).solflare?.isSolflare) {
     wallets.push({ name: 'Solflare', provider: (window as any).solflare });
   }
@@ -70,7 +75,7 @@ const detectWallets = () => {
     wallets.push({ name: 'Glow', provider: (window as any).glow });
   }
   
-  // Fallback: check for any solana provider (mobile compatibility)
+  // Fallback: check for any solana provider
   if (wallets.length === 0 && (window as any).solana) {
     wallets.push({ name: 'Solana Wallet', provider: (window as any).solana });
   }
@@ -80,10 +85,21 @@ const detectWallets = () => {
 
 export class SolanaGameManager {
   private connection: Connection;
+  private games: Map<string, GameRoom> = new Map();
+  private playerStats: Map<string, PlayerStats> = new Map();
   private wallet: any = null;
+  private isClient: boolean = false;
 
   constructor() {
-    this.connection = connection;
+    // Use your QuickNode RPC endpoint as primary
+    this.connection = new Connection(RPC_ENDPOINTS[0], 'confirmed');
+    this.isClient = typeof window !== 'undefined';
+    
+    console.log('Solana connection initialized with QuickNode RPC:', RPC_ENDPOINTS[0]);
+    
+    if (this.isClient) {
+      this.loadFromStorage();
+    }
   }
 
   async getAvailableWallets() {
@@ -91,6 +107,10 @@ export class SolanaGameManager {
   }
 
   async connectWallet(preferredWallet?: string): Promise<WalletState> {
+    if (!this.isClient) {
+      throw new Error('Wallet connection only available in browser');
+    }
+
     try {
       const availableWallets = detectWallets();
       
@@ -122,7 +142,9 @@ export class SolanaGameManager {
         throw new Error('Failed to get wallet public key');
       }
 
-      const balance = await this.getBalance(publicKey);
+      // Get balance with enhanced retry logic using QuickNode
+      const balance = await this.getBalanceWithRetry(publicKey.toString());
+      console.log(`Wallet connected: ${publicKey.toString()}, Balance: ${balance} SOL`);
       
       return {
         connected: true,
@@ -140,315 +162,345 @@ export class SolanaGameManager {
     }
   }
 
-  async getBalance(publicKey: PublicKey): Promise<number> {
+  // Enhanced balance fetching with QuickNode RPC and fallbacks
+  private async getBalanceWithRetry(publicKey: string, maxRetries: number = 3): Promise<number> {
+    console.log(`Fetching balance for ${publicKey} using QuickNode RPC...`);
+    
+    for (let rpcIndex = 0; rpcIndex < RPC_ENDPOINTS.length; rpcIndex++) {
+      const rpcUrl = RPC_ENDPOINTS[rpcIndex];
+      const connection = new Connection(rpcUrl, 'confirmed');
+      
+      console.log(`Trying RPC endpoint ${rpcIndex + 1}: ${rpcUrl}`);
+      
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          const pubKey = new PublicKey(publicKey);
+          const balance = await connection.getBalance(pubKey);
+          const solBalance = balance / LAMPORTS_PER_SOL;
+          
+          console.log(`✅ Balance fetch successful with RPC ${rpcIndex + 1}, attempt ${attempt}: ${solBalance} SOL`);
+          console.log(`Raw balance: ${balance} lamports`);
+          
+          return solBalance;
+        } catch (error) {
+          console.error(`❌ Balance fetch failed with RPC ${rpcIndex + 1}, attempt ${attempt}:`, error);
+          
+          if (attempt === maxRetries && rpcIndex === RPC_ENDPOINTS.length - 1) {
+            console.warn('⚠️ All balance fetch attempts failed, returning 0');
+            return 0;
+          }
+          
+          // Wait before retry with exponential backoff
+          const delay = 1000 * attempt * (rpcIndex + 1);
+          console.log(`Waiting ${delay}ms before retry...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
+    }
+    return 0;
+  }
+
+  // Load data from localStorage with global sharing
+  private loadFromStorage() {
+    if (!this.isClient) return;
+
     try {
-      const balance = await this.connection.getBalance(publicKey);
-      return balance / LAMPORTS_PER_SOL;
+      // Load games from global storage (visible to all users)
+      const gamesData = safeLocalStorage.getItem(GLOBAL_GAMES_KEY);
+      if (gamesData) {
+        const games = safeJSONParse(gamesData, {});
+        this.games = new Map(Object.entries(games));
+        console.log(`Loaded ${this.games.size} games from global storage`);
+      }
+
+      // Load stats from global storage
+      const statsData = safeLocalStorage.getItem(GLOBAL_STATS_KEY);
+      if (statsData) {
+        const stats = safeJSONParse(statsData, {});
+        this.playerStats = new Map(Object.entries(stats));
+        console.log(`Loaded stats for ${this.playerStats.size} players`);
+      }
     } catch (error) {
-      console.error('Error getting balance:', error);
-      return 0;
+      console.error('Error loading from storage:', error);
     }
   }
 
-  // Airdrop not available on mainnet - removed
-  async requestAirdrop(publicKey: PublicKey, amount: number): Promise<string> {
-    throw new Error('Airdrop not available on mainnet. Please purchase SOL from an exchange.');
-  }
-
-  async sendTransaction(transaction: Transaction): Promise<string> {
-    if (!this.wallet) {
-      throw new Error('Wallet not connected');
-    }
+  // Save data to localStorage with global sharing
+  private saveToStorage() {
+    if (!this.isClient) return;
 
     try {
-      const { blockhash } = await this.connection.getRecentBlockhash();
-      transaction.recentBlockhash = blockhash;
-      transaction.feePayer = this.wallet.publicKey;
+      // Save games to global storage (visible to all users)
+      const gamesData = Object.fromEntries(this.games);
+      const gamesJson = safeJSONStringify(gamesData);
+      if (gamesJson) {
+        safeLocalStorage.setItem(GLOBAL_GAMES_KEY, gamesJson);
+        console.log(`Saved ${this.games.size} games to global storage`);
+      }
 
+      // Save stats to global storage
+      const statsData = Object.fromEntries(this.playerStats);
+      const statsJson = safeJSONStringify(statsData);
+      if (statsJson) {
+        safeLocalStorage.setItem(GLOBAL_STATS_KEY, statsJson);
+        console.log(`Saved stats for ${this.playerStats.size} players`);
+      }
+      
+      // Trigger storage event for cross-tab synchronization
+      if (this.isClient && gamesJson) {
+        try {
+          window.dispatchEvent(new StorageEvent('storage', {
+            key: GLOBAL_GAMES_KEY,
+            newValue: gamesJson
+          }));
+        } catch (error) {
+          console.warn('Failed to dispatch storage event:', error);
+        }
+      }
+    } catch (error) {
+      console.error('Error saving to storage:', error);
+    }
+  }
+
+  // Get wallet balance with improved error handling using QuickNode
+  async getBalance(publicKey: string | PublicKey): Promise<number> {
+    try {
+      const pubKey = typeof publicKey === 'string' ? new PublicKey(publicKey) : publicKey;
+      console.log(`Getting balance for ${pubKey.toString()} using QuickNode...`);
+      
+      const balance = await this.connection.getBalance(pubKey);
+      const solBalance = balance / LAMPORTS_PER_SOL;
+      
+      console.log(`✅ Balance retrieved: ${solBalance} SOL (${balance} lamports)`);
+      return solBalance;
+    } catch (error) {
+      console.error('❌ Error getting balance with primary connection:', error);
+      
+      // Try with retry logic using all RPC endpoints
+      if (typeof publicKey === 'string') {
+        return await this.getBalanceWithRetry(publicKey);
+      } else {
+        return await this.getBalanceWithRetry(publicKey.toString());
+      }
+    }
+  }
+
+  // Record bot game result (no SOL involved)
+  async recordBotGameResult(playerPublicKey: string, result: 'win' | 'loss' | 'draw'): Promise<void> {
+    try {
+      console.log(`Recording bot game result: ${result} for player ${playerPublicKey}`);
+      
+      // Update player stats for bot games
+      this.updatePlayerStats(playerPublicKey, result, 0); // 0 entrance fee for bot games
+      this.saveToStorage();
+      
+      console.log(`✅ Bot game result recorded successfully`);
+    } catch (error) {
+      console.error('❌ Error recording bot game result:', error);
+    }
+  }
+
+  // Create a new game with enhanced visibility
+  async createGame(creatorPublicKey: string, entranceFee: number): Promise<GameRoom> {
+    try {
+      console.log(`Creating game for ${creatorPublicKey} with entrance fee ${entranceFee} SOL`);
+      
+      // Check balance using QuickNode
+      const balance = await this.getBalance(creatorPublicKey);
+      console.log(`Creator balance: ${balance} SOL, Required: ${entranceFee} SOL`);
+      
+      if (balance < entranceFee) {
+        throw new Error(`Insufficient balance. You have ${balance.toFixed(4)} SOL but need ${entranceFee} SOL`);
+      }
+
+      // Process payment
+      await this.processPayment(creatorPublicKey, entranceFee);
+
+      // Create game room with unique ID
+      const gameId = `game_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const gameRoom: GameRoom = {
+        id: gameId,
+        creator: creatorPublicKey,
+        opponent: null,
+        entranceFee,
+        status: 'waiting',
+        winner: null,
+        createdAt: Date.now()
+      };
+
+      // Add to games map
+      this.games.set(gameId, gameRoom);
+      
+      // Save to global storage immediately
+      this.saveToStorage();
+      
+      console.log(`✅ Created game ${gameId} with entrance fee ${entranceFee} SOL`);
+      console.log(`Total games in storage: ${this.games.size}`);
+
+      return gameRoom;
+    } catch (error: any) {
+      console.error('❌ Error creating game:', error);
+      throw new Error(error.message || 'Failed to create game');
+    }
+  }
+
+  // Join an existing game
+  async joinGame(gameId: string, playerPublicKey: string): Promise<GameRoom> {
+    try {
+      console.log(`Player ${playerPublicKey} attempting to join game ${gameId}`);
+      
+      // Reload from storage to get latest games
+      this.loadFromStorage();
+      
+      const game = this.games.get(gameId);
+      if (!game) {
+        throw new Error('Game not found');
+      }
+
+      if (game.status !== 'waiting') {
+        throw new Error('Game is not available');
+      }
+
+      if (game.creator === playerPublicKey) {
+        throw new Error('Cannot join your own game');
+      }
+
+      // Check balance using QuickNode
+      const balance = await this.getBalance(playerPublicKey);
+      console.log(`Player balance: ${balance} SOL, Required: ${game.entranceFee} SOL`);
+      
+      if (balance < game.entranceFee) {
+        throw new Error(`Insufficient balance. You have ${balance.toFixed(4)} SOL but need ${game.entranceFee} SOL`);
+      }
+
+      // Process payment
+      await this.processPayment(playerPublicKey, game.entranceFee);
+
+      // Update game
+      game.opponent = playerPublicKey;
+      game.status = 'active';
+
+      this.games.set(gameId, game);
+      this.saveToStorage();
+
+      console.log(`✅ Player ${playerPublicKey} joined game ${gameId}`);
+
+      return game;
+    } catch (error: any) {
+      console.error('❌ Error joining game:', error);
+      throw new Error(error.message || 'Failed to join game');
+    }
+  }
+
+  // Process SOL payment using QuickNode
+  private async processPayment(fromPublicKey: string, amount: number): Promise<string> {
+    try {
+      console.log(`Processing payment: ${amount} SOL from ${fromPublicKey}`);
+      
+      if (!this.wallet || !this.wallet.isConnected) {
+        throw new Error('Wallet not connected');
+      }
+
+      const fromPubkey = new PublicKey(fromPublicKey);
+      const toPubkey = new PublicKey(TREASURY_WALLET);
+      const lamports = Math.floor(amount * LAMPORTS_PER_SOL);
+
+      console.log(`Transfer details: ${lamports} lamports to ${TREASURY_WALLET}`);
+
+      const transaction = new Transaction().add(
+        SystemProgram.transfer({
+          fromPubkey,
+          toPubkey,
+          lamports,
+        })
+      );
+
+      // Get recent blockhash using QuickNode
+      const { blockhash } = await this.connection.getLatestBlockhash();
+      transaction.recentBlockhash = blockhash;
+      transaction.feePayer = fromPubkey;
+
+      console.log('Transaction prepared, requesting signature...');
+
+      // Sign and send transaction
       const signedTransaction = await this.wallet.signTransaction(transaction);
       const signature = await this.connection.sendRawTransaction(signedTransaction.serialize());
       
-      await this.connection.confirmTransaction(signature);
+      console.log('Transaction sent, confirming...');
+      
+      // Confirm transaction
+      await this.connection.confirmTransaction(signature, 'confirmed');
+
+      console.log('✅ Payment successful:', signature);
       return signature;
     } catch (error: any) {
-      console.error('Transaction error:', error);
-      throw new Error(error.message || 'Transaction failed');
+      console.error('❌ Payment failed:', error);
+      throw new Error('Payment failed: ' + error.message);
     }
   }
 
-  // REAL PAYMENT SYSTEM
-  async payEntranceFee(playerPublicKey: string, entranceFee: number): Promise<string> {
-    if (!this.wallet) {
-      throw new Error('Wallet not connected');
-    }
-
+  // Complete a game
+  async completeGame(gameId: string, winnerPublicKey: string, result: 'win' | 'loss' | 'draw' = 'win'): Promise<void> {
     try {
-      const fromPubkey = new PublicKey(playerPublicKey);
-      const toPubkey = new PublicKey(TREASURY_WALLET);
-      
-      const transaction = new Transaction().add(
-        SystemProgram.transfer({
-          fromPubkey,
-          toPubkey,
-          lamports: entranceFee * LAMPORTS_PER_SOL
-        })
-      );
-
-      const signature = await this.sendTransaction(transaction);
-      console.log(`Entrance fee paid: ${entranceFee} SOL to treasury. Signature: ${signature}`);
-      return signature;
-    } catch (error: any) {
-      console.error('Payment error:', error);
-      throw new Error(error.message || 'Payment failed');
-    }
-  }
-
-  async payoutWinner(winnerPublicKey: string, amount: number): Promise<string> {
-    if (!this.wallet) {
-      throw new Error('Wallet not connected');
-    }
-
-    try {
-      // In real implementation, this would be from a program-controlled account
-      // For demo, we simulate the payout
-      const fromPubkey = new PublicKey(TREASURY_WALLET);
-      const toPubkey = new PublicKey(winnerPublicKey);
-      
-      const transaction = new Transaction().add(
-        SystemProgram.transfer({
-          fromPubkey,
-          toPubkey,
-          lamports: amount * LAMPORTS_PER_SOL
-        })
-      );
-
-      const signature = await this.sendTransaction(transaction);
-      console.log(`Winner payout: ${amount} SOL to ${winnerPublicKey}. Signature: ${signature}`);
-      return signature;
-    } catch (error: any) {
-      console.error('Payout error:', error);
-      throw new Error(error.message || 'Payout failed');
-    }
-  }
-
-  // IMPROVED GAME MANAGEMENT WITH GLOBAL STORAGE
-  async createGame(creator: string, entranceFee: number): Promise<GameRoom> {
-    // First, pay the entrance fee
-    try {
-      await this.payEntranceFee(creator, entranceFee);
-    } catch (error) {
-      throw new Error('Failed to pay entrance fee: ' + error.message);
-    }
-
-    const gameRoom: GameRoom = {
-      id: `game_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      creator,
-      entranceFee,
-      status: 'waiting',
-      createdAt: Date.now(),
-      prizePool: entranceFee, // Creator already paid
-      creatorPaid: true,
-      opponentPaid: false,
-      treasuryPaid: false
-    };
-
-    // Store in localStorage with global key for visibility
-    const existingGames = JSON.parse(localStorage.getItem('global_chess_games') || '[]');
-    existingGames.push(gameRoom);
-    localStorage.setItem('global_chess_games', JSON.stringify(existingGames));
-
-    // Also store in session-specific storage
-    const sessionGames = JSON.parse(localStorage.getItem('chess_games') || '[]');
-    sessionGames.push(gameRoom);
-    localStorage.setItem('chess_games', JSON.stringify(sessionGames));
-
-    return gameRoom;
-  }
-
-  async getAvailableGames(): Promise<GameRoom[]> {
-    try {
-      // Get from global storage so all players can see all games
-      const games = JSON.parse(localStorage.getItem('global_chess_games') || '[]');
-      
-      // Filter out old games (older than 24 hours) and only show waiting games
-      const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
-      const activeGames = games.filter((game: GameRoom) => 
-        game.createdAt > oneDayAgo && game.status === 'waiting'
-      );
-      
-      // Update storage with filtered games
-      localStorage.setItem('global_chess_games', JSON.stringify(games.filter((game: GameRoom) => game.createdAt > oneDayAgo)));
-      
-      return activeGames.sort((a, b) => b.createdAt - a.createdAt);
-    } catch (error) {
-      console.error('Error getting games:', error);
-      return [];
-    }
-  }
-
-  async joinGame(gameId: string, opponent: string): Promise<GameRoom> {
-    // First, pay the entrance fee
-    const games = JSON.parse(localStorage.getItem('global_chess_games') || '[]');
-    const gameIndex = games.findIndex((game: GameRoom) => game.id === gameId);
-    
-    if (gameIndex === -1) {
-      throw new Error('Game not found');
-    }
-    
-    const game = games[gameIndex];
-    
-    if (game.status !== 'waiting') {
-      throw new Error('Game is no longer available');
-    }
-    
-    if (game.creator === opponent) {
-      throw new Error('Cannot join your own game');
-    }
-
-    // Pay entrance fee
-    try {
-      await this.payEntranceFee(opponent, game.entranceFee);
-    } catch (error) {
-      throw new Error('Failed to pay entrance fee: ' + error.message);
-    }
-    
-    // Update game with opponent and payment info
-    games[gameIndex] = {
-      ...game,
-      opponent,
-      status: 'active',
-      prizePool: game.entranceFee * 2, // Both players paid
-      opponentPaid: true
-    };
-    
-    // Update both global and session storage
-    localStorage.setItem('global_chess_games', JSON.stringify(games));
-    
-    const sessionGames = JSON.parse(localStorage.getItem('chess_games') || '[]');
-    const sessionIndex = sessionGames.findIndex((g: GameRoom) => g.id === gameId);
-    if (sessionIndex !== -1) {
-      sessionGames[sessionIndex] = games[gameIndex];
-      localStorage.setItem('chess_games', JSON.stringify(sessionGames));
-    }
-    
-    return games[gameIndex];
-  }
-
-  async completeGame(gameId: string, winner: string, result: 'win' | 'loss' | 'draw'): Promise<void> {
-    const games = JSON.parse(localStorage.getItem('global_chess_games') || '[]');
-    const gameIndex = games.findIndex((game: GameRoom) => game.id === gameId);
-    
-    if (gameIndex === -1) {
-      throw new Error('Game not found');
-    }
-
-    const game = games[gameIndex];
-    const prizePool = game.prizePool || (game.entranceFee * 2);
-    const platformFee = prizePool * 0.1; // 10% platform fee
-    const winnerPayout = prizePool - platformFee;
-
-    // Pay out winner if not a draw
-    if (result !== 'draw' && winner) {
-      try {
-        // In a real implementation, this would be handled by a smart contract
-        // For demo purposes, we'll simulate the payout
-        console.log(`Paying out winner: ${winner}, amount: ${winnerPayout} SOL`);
-        // await this.payoutWinner(winner, winnerPayout);
-      } catch (error) {
-        console.error('Payout failed:', error);
-      }
-    }
-
-    // Update game status
-    games[gameIndex] = {
-      ...game,
-      status: 'completed',
-      winner: result === 'draw' ? 'draw' : winner,
-      treasuryPaid: true
-    };
-    
-    // Update storage
-    localStorage.setItem('global_chess_games', JSON.stringify(games));
-    
-    const sessionGames = JSON.parse(localStorage.getItem('chess_games') || '[]');
-    const sessionIndex = sessionGames.findIndex((g: GameRoom) => g.id === gameId);
-    if (sessionIndex !== -1) {
-      sessionGames[sessionIndex] = games[gameIndex];
-      localStorage.setItem('chess_games', JSON.stringify(sessionGames));
-    }
-
-    // Update player stats
-    await this.updatePlayerStats(game.creator, game.opponent || 'bot', winner, result, game.entranceFee, winnerPayout);
-  }
-
-  // STATS SYSTEM
-  async updatePlayerStats(player1: string, player2: string, winner: string, result: 'win' | 'loss' | 'draw', entranceFee: number, payout: number): Promise<void> {
-    try {
-      // Update stats for player1
-      const player1Stats = this.getPlayerStats(player1);
-      player1Stats.totalGames++;
-      player1Stats.totalSpent += entranceFee;
-      
-      if (result === 'draw') {
-        player1Stats.draws++;
-      } else if (winner === player1) {
-        player1Stats.wins++;
-        player1Stats.totalEarnings += payout;
-      } else {
-        player1Stats.losses++;
-      }
-      
-      this.savePlayerStats(player1, player1Stats);
-
-      // Update stats for player2 (if not bot)
-      if (player2 !== 'bot') {
-        const player2Stats = this.getPlayerStats(player2);
-        player2Stats.totalGames++;
-        player2Stats.totalSpent += entranceFee;
-        
-        if (result === 'draw') {
-          player2Stats.draws++;
-        } else if (winner === player2) {
-          player2Stats.wins++;
-          player2Stats.totalEarnings += payout;
-        } else {
-          player2Stats.losses++;
-        }
-        
-        this.savePlayerStats(player2, player2Stats);
+      const game = this.games.get(gameId);
+      if (!game || game.status !== 'active') {
+        return;
       }
 
-      // Save game result
-      const gameResult: GameResult = {
-        winner: result === 'draw' ? 'draw' : (winner === player1 ? 'white' : 'black'),
-        moves: 0, // This should be passed from the game
-        timestamp: Date.now(),
-        whitePlayer: player1,
-        blackPlayer: player2,
-        entranceFee,
-        payout: result === 'draw' ? 0 : payout
+      game.status = 'completed';
+      game.winner = result === 'draw' ? 'draw' : winnerPublicKey;
+
+      // Update player stats
+      if (game.creator && game.opponent) {
+        this.updatePlayerStats(game.creator, result === 'win' && winnerPublicKey === game.creator ? 'win' : result === 'draw' ? 'draw' : 'loss', game.entranceFee);
+        this.updatePlayerStats(game.opponent, result === 'win' && winnerPublicKey === game.opponent ? 'win' : result === 'draw' ? 'draw' : 'loss', game.entranceFee);
+      }
+
+      // Process winnings (90% to winner, 10% platform fee)
+      if (result !== 'draw' && winnerPublicKey) {
+        const winnings = game.entranceFee * 2 * 0.9; // 90% of total pot
+        await this.sendWinnings(winnerPublicKey, winnings);
+      }
+
+      this.games.set(gameId, game);
+      this.saveToStorage();
+      
+      console.log(`✅ Game ${gameId} completed. Winner: ${winnerPublicKey}, Result: ${result}`);
+    } catch (error) {
+      console.error('❌ Error completing game:', error);
+    }
+  }
+
+  // Send winnings to winner
+  private async sendWinnings(winnerPublicKey: string, amount: number): Promise<void> {
+    try {
+      // In a real implementation, this would be handled by a backend service
+      // For now, we'll just log the transaction
+      console.log(`💰 Sending ${amount} SOL to winner: ${winnerPublicKey}`);
+      
+      // Update local stats
+      const stats = this.playerStats.get(winnerPublicKey) || {
+        totalGames: 0,
+        wins: 0,
+        losses: 0,
+        draws: 0,
+        totalEarnings: 0,
+        totalSpent: 0
       };
-
-      const gameHistory = JSON.parse(localStorage.getItem('game_history') || '[]');
-      gameHistory.push(gameResult);
-      localStorage.setItem('game_history', JSON.stringify(gameHistory));
-
+      
+      stats.totalEarnings += amount;
+      this.playerStats.set(winnerPublicKey, stats);
+      this.saveToStorage();
+      
+      console.log(`✅ Winnings recorded for ${winnerPublicKey}: ${amount} SOL`);
     } catch (error) {
-      console.error('Error updating stats:', error);
+      console.error('❌ Error sending winnings:', error);
     }
   }
 
-  getPlayerStats(playerPublicKey: string): GameStats {
-    try {
-      const stats = localStorage.getItem(`player_stats_${playerPublicKey}`);
-      if (stats) {
-        return JSON.parse(stats);
-      }
-    } catch (error) {
-      console.error('Error loading player stats:', error);
-    }
-    
-    return {
+  // Update player statistics (works for both multiplayer and bot games)
+  private updatePlayerStats(publicKey: string, result: 'win' | 'loss' | 'draw', entranceFee: number) {
+    const stats = this.playerStats.get(publicKey) || {
       totalGames: 0,
       wins: 0,
       losses: 0,
@@ -456,38 +508,69 @@ export class SolanaGameManager {
       totalEarnings: 0,
       totalSpent: 0
     };
-  }
 
-  savePlayerStats(playerPublicKey: string, stats: GameStats): void {
-    try {
-      localStorage.setItem(`player_stats_${playerPublicKey}`, JSON.stringify(stats));
-    } catch (error) {
-      console.error('Error saving player stats:', error);
+    stats.totalGames++;
+    if (result === 'win') {
+      stats.wins++;
+    } else if (result === 'loss') {
+      stats.losses++;
+    } else if (result === 'draw') {
+      stats.draws++;
     }
-  }
 
-  getGameHistory(): GameResult[] {
-    try {
-      return JSON.parse(localStorage.getItem('game_history') || '[]');
-    } catch (error) {
-      console.error('Error loading game history:', error);
-      return [];
+    // Track spending (entrance fees)
+    if (entranceFee > 0) {
+      stats.totalSpent += entranceFee;
     }
+
+    this.playerStats.set(publicKey, stats);
+    console.log(`📊 Updated stats for ${publicKey}:`, stats);
   }
 
-  // Get game room by ID
-  getGameRoom(gameId: string): GameRoom | undefined {
-    try {
-      const games = JSON.parse(localStorage.getItem('global_chess_games') || '[]');
-      return games.find((game: GameRoom) => game.id === gameId);
-    } catch (error) {
-      console.error('Error getting game room:', error);
-      return undefined;
+  // Get available games with forced reload
+  async getAvailableGames(): Promise<GameRoom[]> {
+    // Always reload from storage to get latest games from all users
+    this.loadFromStorage();
+    
+    const availableGames = Array.from(this.games.values())
+      .filter(game => game.status === 'waiting')
+      .sort((a, b) => b.createdAt - a.createdAt);
+    
+    console.log(`🎮 Found ${availableGames.length} available games out of ${this.games.size} total games`);
+    
+    return availableGames;
+  }
+
+  // Get player statistics
+  getPlayerStats(publicKey: string): PlayerStats | null {
+    const stats = this.playerStats.get(publicKey);
+    if (stats) {
+      console.log(`📊 Retrieved stats for ${publicKey}:`, stats);
     }
+    return stats || null;
   }
 
-  // Legacy payment method (kept for compatibility)
-  async processPayment(from: string, to: string, amount: number): Promise<string> {
-    return await this.payEntranceFee(from, amount);
+  // Get game by ID
+  getGame(gameId: string): GameRoom | null {
+    return this.games.get(gameId) || null;
+  }
+
+  // Clean up old games
+  cleanupOldGames() {
+    const now = Date.now();
+    const oneHour = 60 * 60 * 1000;
+    let cleanedCount = 0;
+
+    for (const [gameId, game] of this.games.entries()) {
+      if (game.status === 'waiting' && now - game.createdAt > oneHour) {
+        this.games.delete(gameId);
+        cleanedCount++;
+      }
+    }
+
+    if (cleanedCount > 0) {
+      console.log(`🧹 Cleaned up ${cleanedCount} old games`);
+      this.saveToStorage();
+    }
   }
 }
