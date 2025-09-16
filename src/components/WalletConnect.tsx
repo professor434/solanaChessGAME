@@ -2,9 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Wallet, Copy, ExternalLink, RefreshCw, Coins, AlertCircle, ChevronDown, ExternalLinkIcon } from 'lucide-react';
-import { SolanaGameManager, WalletState, TREASURY_WALLET } from '@/lib/solana-integration';
+import { Wallet, ExternalLink, CheckCircle, AlertCircle, Download } from 'lucide-react';
 import { toast } from 'sonner';
+import { walletManager, WalletAdapter } from '@/lib/wallet-manager';
+import { SolanaGameManager, WalletState } from '@/lib/solana-integration';
 
 interface WalletConnectProps {
   onWalletConnected: (walletState: WalletState) => void;
@@ -12,82 +13,58 @@ interface WalletConnectProps {
 }
 
 export default function WalletConnect({ onWalletConnected, solanaManager }: WalletConnectProps) {
+  const [availableWallets, setAvailableWallets] = useState<WalletAdapter[]>([]);
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [connectedWallet, setConnectedWallet] = useState<string | null>(null);
   const [walletState, setWalletState] = useState<WalletState>({
     connected: false,
     publicKey: null,
     balance: 0
   });
-  const [isConnecting, setIsConnecting] = useState(false);
-  const [isRefreshing, setIsRefreshing] = useState(false);
-  const [availableWallets, setAvailableWallets] = useState<any[]>([]);
-  const [showWalletOptions, setShowWalletOptions] = useState(false);
 
-  // Check for existing wallet connection on mount
   useEffect(() => {
-    checkWalletConnection();
     loadAvailableWallets();
+    // Refresh wallet list every 2 seconds to detect newly installed wallets
+    const interval = setInterval(loadAvailableWallets, 2000);
+    return () => clearInterval(interval);
   }, []);
 
   const loadAvailableWallets = async () => {
     try {
-      const wallets = await solanaManager.getAvailableWallets();
+      const wallets = await walletManager.getAvailableWallets();
       setAvailableWallets(wallets);
     } catch (error) {
       console.error('Error loading wallets:', error);
     }
   };
 
-  const checkWalletConnection = async () => {
-    try {
-      // Check all possible wallet providers for existing connections
-      const providers = [
-        (window as any).phantom?.solana,
-        (window as any).solflare,
-        (window as any).backpack,
-        (window as any).glow,
-        (window as any).solana // Generic fallback
-      ];
-
-      for (const provider of providers) {
-        if (provider && provider.isConnected) {
-          const publicKey = provider.publicKey?.toString();
-          if (publicKey) {
-            const balance = await solanaManager.getBalance(provider.publicKey);
-            const connectedState = {
-              connected: true,
-              publicKey,
-              balance
-            };
-            setWalletState(connectedState);
-            onWalletConnected(connectedState);
-            break;
-          }
-        }
-      }
-    } catch (error) {
-      console.error('Error checking wallet connection:', error);
+  const handleConnectWallet = async (walletName: string) => {
+    if (walletState.connected) {
+      await handleDisconnect();
+      return;
     }
-  };
 
-  const handleConnectWallet = async (walletName?: string) => {
     setIsConnecting(true);
     try {
-      const connected = await solanaManager.connectWallet(walletName);
-      setWalletState(connected);
-      onWalletConnected(connected);
-      setShowWalletOptions(false);
-      toast.success(`Wallet connected successfully!`);
+      const { publicKey, walletName: connectedName } = await walletManager.connectWallet(walletName);
       
-      // Auto-redirect for mobile wallets
-      if (window.innerWidth <= 768) {
-        const currentUrl = window.location.href;
-        setTimeout(() => {
-          window.location.href = currentUrl;
-        }, 1000);
-      }
+      // Get balance using Solana manager
+      const balance = await solanaManager.getBalance(publicKey);
+      
+      const newWalletState: WalletState = {
+        connected: true,
+        publicKey,
+        balance
+      };
+
+      setWalletState(newWalletState);
+      setConnectedWallet(connectedName);
+      onWalletConnected(newWalletState);
+      
+      toast.success(`Connected to ${connectedName}!`);
     } catch (error: any) {
-      console.error('Failed to connect wallet:', error);
-      toast.error(error.message || 'Failed to connect wallet. Please try again.');
+      console.error('Wallet connection error:', error);
+      toast.error(error.message || 'Failed to connect wallet');
     } finally {
       setIsConnecting(false);
     }
@@ -95,308 +72,178 @@ export default function WalletConnect({ onWalletConnected, solanaManager }: Wall
 
   const handleDisconnect = async () => {
     try {
-      // Try to disconnect from all possible providers
-      const providers = [
-        (window as any).phantom?.solana,
-        (window as any).solflare,
-        (window as any).backpack,
-        (window as any).glow,
-        (window as any).solana
-      ];
-
-      for (const provider of providers) {
-        if (provider && provider.disconnect) {
-          try {
-            await provider.disconnect();
-          } catch (e) {
-            // Ignore individual disconnect errors
-          }
-        }
-      }
+      await walletManager.disconnectWallet();
       
-      const disconnectedState = {
+      const disconnectedState: WalletState = {
         connected: false,
         publicKey: null,
         balance: 0
       };
+
       setWalletState(disconnectedState);
+      setConnectedWallet(null);
       onWalletConnected(disconnectedState);
-      toast.info('Wallet disconnected');
+      
+      toast.success('Wallet disconnected');
     } catch (error) {
       console.error('Error disconnecting wallet:', error);
       toast.error('Failed to disconnect wallet');
     }
   };
 
-  const refreshBalance = async () => {
-    if (!walletState.connected || !walletState.publicKey) return;
-    
-    setIsRefreshing(true);
-    try {
-      // Find the connected provider
-      const providers = [
-        (window as any).phantom?.solana,
-        (window as any).solflare,
-        (window as any).backpack,
-        (window as any).glow,
-        (window as any).solana
-      ];
-
-      let connectedProvider = null;
-      for (const provider of providers) {
-        if (provider && provider.isConnected && provider.publicKey) {
-          connectedProvider = provider;
-          break;
-        }
-      }
-
-      if (connectedProvider) {
-        const balance = await solanaManager.getBalance(connectedProvider.publicKey);
-        const updatedState = { ...walletState, balance };
-        setWalletState(updatedState);
-        onWalletConnected(updatedState);
-        toast.success('Balance refreshed');
-      }
-    } catch (error) {
-      console.error('Error refreshing balance:', error);
-      toast.error('Failed to refresh balance');
-    } finally {
-      setIsRefreshing(false);
-    }
+  const openWalletUrl = (url: string) => {
+    window.open(url, '_blank', 'noopener,noreferrer');
   };
 
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
-    toast.success('Copied to clipboard!');
-  };
-
-  const truncateAddress = (address: string): string => {
-    return `${address.slice(0, 4)}...${address.slice(-4)}`;
+  const formatAddress = (address: string) => {
+    return `${address.slice(0, 6)}...${address.slice(-4)}`;
   };
 
   if (walletState.connected) {
     return (
-      <Card className="w-full">
+      <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-lg">
-            <Wallet className="h-5 w-5 text-green-600" />
+          <CardTitle className="flex items-center gap-2">
+            <CheckCircle className="h-5 w-5 text-green-600" />
             Wallet Connected
-            <Badge variant="default" className="bg-green-600 text-xs">
-              Mainnet
-            </Badge>
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          {/* Wallet Info */}
-          <div className="space-y-3">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <span className="text-sm font-medium">Address:</span>
-              <div className="flex items-center gap-2">
-                <Badge variant="outline" className="font-mono text-xs">
-                  {truncateAddress(walletState.publicKey!)}
-                </Badge>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => copyToClipboard(walletState.publicKey!)}
-                  className="h-8 w-8 p-0"
-                >
-                  <Copy className="h-3 w-3" />
-                </Button>
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="font-medium">{connectedWallet}</div>
+              <div className="text-sm text-gray-600">
+                {formatAddress(walletState.publicKey!)}
               </div>
             </div>
-            
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <span className="text-sm font-medium">Balance:</span>
-              <div className="flex items-center gap-2">
-                <Badge variant="secondary" className="flex items-center gap-1">
-                  <Coins className="h-3 w-3" />
-                  {walletState.balance.toFixed(4)} SOL
-                </Badge>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={refreshBalance}
-                  disabled={isRefreshing}
-                  className="h-8 w-8 p-0"
-                >
-                  <RefreshCw className={`h-3 w-3 ${isRefreshing ? 'animate-spin' : ''}`} />
-                </Button>
-              </div>
-            </div>
+            <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200">
+              Connected
+            </Badge>
+          </div>
+          
+          <div className="bg-gray-50 p-3 rounded-lg">
+            <div className="text-sm text-gray-600">Balance</div>
+            <div className="text-lg font-bold">{walletState.balance.toFixed(4)} SOL</div>
           </div>
 
-          {/* Low Balance Warning */}
-          {walletState.balance < 0.01 && (
-            <div className="flex items-start gap-2 text-sm text-amber-700 bg-amber-50 p-3 rounded-lg border border-amber-200">
-              <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
-              <div>
-                <div className="font-medium">Low Balance</div>
-                <div className="text-xs mt-1">You need SOL to play games with entrance fees. Purchase SOL from an exchange.</div>
-              </div>
-            </div>
-          )}
-
-          {/* Buy SOL Info */}
-          <div className="bg-blue-50 p-3 rounded-lg text-sm border border-blue-200">
-            <div className="font-medium text-blue-900 mb-2">💰 Need SOL?</div>
-            <div className="text-blue-700 space-y-1 mb-2">
-              <div>• Buy SOL on exchanges like Coinbase, Binance, or Kraken</div>
-              <div>• Transfer to your wallet address above</div>
-              <div>• Minimum 0.01 SOL recommended for game fees</div>
-            </div>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => window.open('https://coinbase.com/price/solana', '_blank')}
-              className="text-blue-700 border-blue-300 hover:bg-blue-100"
-            >
-              <ExternalLinkIcon className="h-3 w-3 mr-1" />
-              Buy SOL
-            </Button>
-          </div>
-
-          {/* Action Buttons */}
-          <div className="flex flex-col sm:flex-row gap-2">
-            <Button
-              variant="outline"
-              onClick={handleDisconnect}
-              className="flex-1"
-            >
-              Disconnect
-            </Button>
-          </div>
-
-          {/* Treasury Info */}
-          <div className="pt-3 border-t">
-            <div className="text-xs text-muted-foreground mb-2">Treasury Wallet:</div>
-            <div className="flex items-center gap-2">
-              <Badge variant="outline" className="font-mono text-xs">
-                {truncateAddress(TREASURY_WALLET)}
-              </Badge>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => copyToClipboard(TREASURY_WALLET)}
-                className="h-6 w-6 p-0"
-              >
-                <Copy className="h-3 w-3" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => window.open(`https://explorer.solana.com/address/${TREASURY_WALLET}`, '_blank')}
-                className="h-6 w-6 p-0"
-              >
-                <ExternalLink className="h-3 w-3" />
-              </Button>
-            </div>
-          </div>
-
-          <div className="text-xs text-center text-muted-foreground">
-            Connected to Solana Mainnet • Real SOL transactions
-          </div>
+          <Button 
+            variant="outline" 
+            onClick={handleDisconnect}
+            className="w-full"
+          >
+            Disconnect Wallet
+          </Button>
         </CardContent>
       </Card>
     );
   }
 
+  const installedWallets = availableWallets.filter(w => w.readyState === 'Installed');
+  const notInstalledWallets = availableWallets.filter(w => w.readyState === 'NotDetected');
+
   return (
-    <Card className="w-full">
+    <Card>
       <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-lg">
+        <CardTitle className="flex items-center gap-2">
           <Wallet className="h-5 w-5" />
-          Connect Solana Wallet
+          Connect Wallet
         </CardTitle>
       </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="text-sm text-muted-foreground">
-          Connect your Solana wallet to play chess and make payments with SOL.
-        </div>
-        
-        <div className="space-y-2">
-          <div className="text-xs font-medium">Supported Wallets:</div>
-          <div className="flex flex-wrap gap-2">
-            <Badge variant="outline">Phantom</Badge>
-            <Badge variant="outline">Solflare</Badge>
-            <Badge variant="outline">Backpack</Badge>
-            <Badge variant="outline">Glow</Badge>
-          </div>
-          
-          {availableWallets.length > 0 && (
-            <div className="text-xs text-green-600">
-              ✓ {availableWallets.length} wallet(s) detected
+      <CardContent>
+        <div className="space-y-4">
+          {/* Installed Wallets */}
+          {installedWallets.length > 0 && (
+            <div className="space-y-3">
+              <h3 className="text-sm font-medium text-gray-700">Available Wallets</h3>
+              {installedWallets.map((wallet) => (
+                <Button
+                  key={wallet.name}
+                  onClick={() => handleConnectWallet(wallet.name)}
+                  disabled={isConnecting}
+                  className="w-full justify-between"
+                  variant="outline"
+                >
+                  <div className="flex items-center gap-2">
+                    <img 
+                      src={wallet.icon} 
+                      alt={wallet.name} 
+                      className="w-5 h-5"
+                      onError={(e) => {
+                        (e.target as HTMLImageElement).style.display = 'none';
+                      }}
+                    />
+                    <span>{wallet.name}</span>
+                  </div>
+                  <Badge variant="secondary" className="bg-green-100 text-green-800">
+                    Ready
+                  </Badge>
+                </Button>
+              ))}
             </div>
           )}
-        </div>
 
-        <div className="bg-red-50 p-3 rounded-lg text-xs border border-red-200">
-          <div className="font-medium text-red-900 mb-1">⚠️ Mainnet Warning:</div>
-          <div className="text-red-700 space-y-1">
-            <div>• This uses REAL SOL on Solana mainnet</div>
-            <div>• All transactions cost real money</div>
-            <div>• Make sure you have SOL in your wallet</div>
-            <div>• Start with small amounts for testing</div>
-          </div>
-        </div>
+          {/* Not Installed Wallets */}
+          {notInstalledWallets.length > 0 && (
+            <div className="space-y-3">
+              <h3 className="text-sm font-medium text-gray-700">
+                {installedWallets.length > 0 ? 'More Wallets' : 'Install a Wallet'}
+              </h3>
+              {notInstalledWallets.slice(0, 6).map((wallet) => (
+                <div key={wallet.name} className="flex items-center justify-between p-3 border rounded-lg bg-gray-50">
+                  <div className="flex items-center gap-2">
+                    <img 
+                      src={wallet.icon} 
+                      alt={wallet.name} 
+                      className="w-5 h-5 opacity-50"
+                      onError={(e) => {
+                        (e.target as HTMLImageElement).style.display = 'none';
+                      }}
+                    />
+                    <span className="text-gray-600">{wallet.name}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Badge variant="outline" className="text-gray-500">
+                      Not Installed
+                    </Badge>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => openWalletUrl(wallet.url)}
+                      title={`Install ${wallet.name}`}
+                    >
+                      <Download className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
 
-        <div className="bg-blue-50 p-3 rounded-lg text-xs border border-blue-200">
-          <div className="font-medium text-blue-900 mb-1">Game Economics:</div>
-          <div className="text-blue-700 space-y-1">
-            <div>• Pay entrance fee in SOL to join games</div>
-            <div>• Winner gets 90% of the prize pool</div>
-            <div>• 10% platform fee goes to treasury</div>
-          </div>
-        </div>
+          {/* No Wallets Message */}
+          {installedWallets.length === 0 && (
+            <div className="text-center py-6">
+              <AlertCircle className="h-12 w-12 text-gray-400 mx-auto mb-3" />
+              <h3 className="font-medium text-gray-900 mb-2">No Wallets Detected</h3>
+              <p className="text-sm text-gray-600 mb-4">
+                Install a Solana wallet to start playing with real SOL stakes
+              </p>
+              <div className="text-xs text-gray-500">
+                We recommend starting with Phantom - it's the most popular Solana wallet
+              </div>
+            </div>
+          )}
 
-        {/* Wallet Selection */}
-        {availableWallets.length > 1 ? (
-          <div className="space-y-2">
-            <Button 
-              variant="outline"
-              onClick={() => setShowWalletOptions(!showWalletOptions)}
-              className="w-full justify-between"
+          {/* Refresh Button */}
+          <div className="pt-2 border-t">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={loadAvailableWallets}
+              className="w-full text-xs"
             >
-              Select Wallet ({availableWallets.length} available)
-              <ChevronDown className={`h-4 w-4 transition-transform ${showWalletOptions ? 'rotate-180' : ''}`} />
+              🔄 Refresh Wallet List
             </Button>
-            
-            {showWalletOptions && (
-              <div className="space-y-2 border rounded-lg p-2">
-                {availableWallets.map((wallet) => (
-                  <Button
-                    key={wallet.name}
-                    variant="ghost"
-                    onClick={() => handleConnectWallet(wallet.name)}
-                    disabled={isConnecting}
-                    className="w-full justify-start"
-                  >
-                    <Wallet className="h-4 w-4 mr-2" />
-                    {wallet.name}
-                  </Button>
-                ))}
-              </div>
-            )}
           </div>
-        ) : (
-          <Button 
-            onClick={() => handleConnectWallet()}
-            disabled={isConnecting}
-            className="w-full bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700"
-          >
-            {isConnecting ? (
-              <div className="flex items-center gap-2">
-                <RefreshCw className="h-4 w-4 animate-spin" />
-                Connecting...
-              </div>
-            ) : (
-              `Connect ${availableWallets.length > 0 ? availableWallets[0].name : 'Wallet'}`
-            )}
-          </Button>
-        )}
-
-        <div className="text-xs text-center text-muted-foreground">
-          Mainnet - Real SOL transactions
         </div>
       </CardContent>
     </Card>
