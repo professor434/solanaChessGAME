@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Wallet, ExternalLink, RefreshCw, CheckCircle, AlertCircle } from 'lucide-react';
+import { Wallet, ExternalLink, RefreshCw, CheckCircle, AlertCircle, Search } from 'lucide-react';
 import { toast } from 'sonner';
 import { walletManager, WalletInfo, ConnectedWallet } from '@/lib/wallet-manager';
 import { SolanaGameManager, WalletState } from '@/lib/solana-integration';
@@ -20,14 +20,21 @@ export default function WalletConnect({ onWalletConnected, solanaManager }: Wall
   const [balance, setBalance] = useState<number>(0);
   const [isLoadingBalance, setIsLoadingBalance] = useState(false);
   const [autoReconnectAttempted, setAutoReconnectAttempted] = useState(false);
+  const [isDetectingWallets, setIsDetectingWallets] = useState(true);
 
   useEffect(() => {
     // Initialize wallets
-    const available = walletManager.getAvailableWallets();
-    const all = walletManager.getAllWallets();
-    
-    setAvailableWallets(available);
-    setAllWallets(all);
+    const updateWallets = () => {
+      const available = walletManager.getAvailableWallets();
+      const all = walletManager.getAllWallets();
+      
+      setAvailableWallets(available);
+      setAllWallets(all);
+      
+      console.log(`🔍 UI Updated: ${available.length} available wallets`);
+    };
+
+    updateWallets();
 
     // Check for existing connection
     const existing = walletManager.getConnectedWallet();
@@ -35,6 +42,12 @@ export default function WalletConnect({ onWalletConnected, solanaManager }: Wall
       setConnectedWallet(existing);
       handleWalletConnected(existing);
     }
+
+    // Listen for wallet updates
+    const handleWalletsUpdated = () => {
+      console.log('🔄 Wallets updated event received');
+      updateWallets();
+    };
 
     // Listen for auto-reconnection events
     const handleAutoReconnect = (event: CustomEvent) => {
@@ -45,16 +58,19 @@ export default function WalletConnect({ onWalletConnected, solanaManager }: Wall
       toast.success(`🔄 Auto-reconnected to ${wallet.name}!`);
     };
 
+    window.addEventListener('walletsUpdated', handleWalletsUpdated);
     window.addEventListener('walletAutoReconnected', handleAutoReconnect as EventListener);
 
-    // Set auto-reconnect flag after a short delay
-    const timer = setTimeout(() => {
+    // Stop detecting after 30 seconds
+    const detectTimer = setTimeout(() => {
+      setIsDetectingWallets(false);
       setAutoReconnectAttempted(true);
-    }, 2000);
+    }, 30000);
 
     return () => {
+      window.removeEventListener('walletsUpdated', handleWalletsUpdated);
       window.removeEventListener('walletAutoReconnected', handleAutoReconnect as EventListener);
-      clearTimeout(timer);
+      clearTimeout(detectTimer);
     };
   }, []);
 
@@ -138,6 +154,16 @@ export default function WalletConnect({ onWalletConnected, solanaManager }: Wall
     }
   };
 
+  const handleRefreshWallets = () => {
+    setIsDetectingWallets(true);
+    walletManager.refreshWalletDetection();
+    toast.info('Refreshing wallet detection...');
+    
+    setTimeout(() => {
+      setIsDetectingWallets(false);
+    }, 5000);
+  };
+
   const validateAndReconnect = async () => {
     if (!connectedWallet) return;
     
@@ -161,7 +187,7 @@ export default function WalletConnect({ onWalletConnected, solanaManager }: Wall
   useEffect(() => {
     if (!connectedWallet) return;
     
-    const interval = setInterval(validateAndReconnect, 30000); // Check every 30 seconds
+    const interval = setInterval(validateAndReconnect, 30000);
     return () => clearInterval(interval);
   }, [connectedWallet]);
 
@@ -178,7 +204,13 @@ export default function WalletConnect({ onWalletConnected, solanaManager }: Wall
           <div className="flex items-center justify-between p-3 bg-green-50 rounded-lg">
             <div className="flex items-center gap-3">
               <div className="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center">
-                <Wallet className="h-4 w-4 text-green-600" />
+                <span className="text-lg">{connectedWallet.name === 'Phantom' ? '👻' : 
+                                            connectedWallet.name === 'Solflare' ? '🔥' : 
+                                            connectedWallet.name === 'Backpack' ? '🎒' : 
+                                            connectedWallet.name === 'Glow' ? '✨' : 
+                                            connectedWallet.name === 'Coinbase Wallet' ? '🔵' : 
+                                            connectedWallet.name === 'Trust Wallet' ? '🛡️' : 
+                                            connectedWallet.name === 'Slope' ? '📈' : '🔗'}</span>
               </div>
               <div>
                 <div className="font-medium">{connectedWallet.name}</div>
@@ -227,7 +259,7 @@ export default function WalletConnect({ onWalletConnected, solanaManager }: Wall
           </div>
 
           <div className="text-xs text-center text-gray-500">
-            💾 Wallet will stay connected across page refreshes
+            💾 Wallet stays connected across page refreshes
           </div>
         </CardContent>
       </Card>
@@ -240,10 +272,10 @@ export default function WalletConnect({ onWalletConnected, solanaManager }: Wall
         <CardTitle className="flex items-center gap-2">
           <Wallet className="h-5 w-5" />
           Connect Wallet
-          {!autoReconnectAttempted && (
+          {(isDetectingWallets || !autoReconnectAttempted) && (
             <div className="flex items-center gap-1 text-sm text-blue-600">
-              <RefreshCw className="h-3 w-3 animate-spin" />
-              Checking...
+              <Search className="h-3 w-3 animate-pulse" />
+              Detecting...
             </div>
           )}
         </CardTitle>
@@ -251,8 +283,18 @@ export default function WalletConnect({ onWalletConnected, solanaManager }: Wall
       <CardContent className="space-y-4">
         {availableWallets.length > 0 ? (
           <>
-            <div className="text-sm text-gray-600 mb-3">
-              Select a wallet to connect:
+            <div className="flex items-center justify-between mb-3">
+              <div className="text-sm text-gray-600">
+                Found {availableWallets.length} wallet{availableWallets.length !== 1 ? 's' : ''}:
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleRefreshWallets}
+                disabled={isDetectingWallets}
+              >
+                <RefreshCw className={`h-3 w-3 ${isDetectingWallets ? 'animate-spin' : ''}`} />
+              </Button>
             </div>
             <div className="space-y-2">
               {availableWallets.map((wallet) => (
@@ -264,14 +306,7 @@ export default function WalletConnect({ onWalletConnected, solanaManager }: Wall
                   disabled={isConnecting}
                 >
                   <div className="flex items-center gap-3">
-                    <img 
-                      src={wallet.icon} 
-                      alt={wallet.name}
-                      className="w-6 h-6"
-                      onError={(e) => {
-                        (e.target as HTMLImageElement).src = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTIxIDEyQzIxIDEzLjEgMjAuMSAxNCAMOSAxNEM3LjkgMTQgNyAxMy4xIDcgMTJDNyAxMC45IDcuOSAxMCA5IDEwQzEwLjEgMTAgMTEgMTAuOSAxMSAxMloiIGZpbGw9IiM5Q0EzQUYiLz4KPC9zdmc+';
-                      }}
-                    />
+                    <span className="text-2xl">{wallet.icon}</span>
                     <div className="text-left">
                       <div className="font-medium">{wallet.name}</div>
                       <div className="text-xs text-gray-500">Click to connect</div>
@@ -286,24 +321,43 @@ export default function WalletConnect({ onWalletConnected, solanaManager }: Wall
             <AlertCircle className="h-12 w-12 text-yellow-500 mx-auto mb-3" />
             <h3 className="font-medium mb-2">No Wallets Detected</h3>
             <p className="text-sm text-gray-600 mb-4">
-              Install a Solana wallet to get started:
+              {isDetectingWallets ? 'Still searching for wallets...' : 'Install a Solana wallet to get started:'}
             </p>
-            <div className="space-y-2">
-              {allWallets.slice(0, 3).map((wallet) => (
+            
+            {!isDetectingWallets && (
+              <>
+                <div className="space-y-2 mb-4">
+                  {allWallets.slice(0, 4).map((wallet) => (
+                    <Button
+                      key={wallet.name}
+                      variant="outline"
+                      size="sm"
+                      onClick={() => window.open(wallet.url, '_blank')}
+                      className="w-full justify-between"
+                    >
+                      <span className="flex items-center gap-2">
+                        <span>{wallet.icon}</span>
+                        {wallet.name}
+                      </span>
+                      <ExternalLink className="h-3 w-3" />
+                    </Button>
+                  ))}
+                </div>
+                
                 <Button
-                  key={wallet.name}
-                  variant="outline"
+                  variant="ghost"
                   size="sm"
-                  onClick={() => window.open(wallet.url, '_blank')}
-                  className="w-full justify-between"
+                  onClick={handleRefreshWallets}
+                  className="w-full"
                 >
-                  <span>{wallet.name}</span>
-                  <ExternalLink className="h-3 w-3" />
+                  <RefreshCw className="h-4 w-4 mr-2" />
+                  Refresh Detection
                 </Button>
-              ))}
-            </div>
+              </>
+            )}
+            
             <div className="mt-4 text-xs text-gray-500">
-              After installing, refresh this page
+              After installing a wallet, refresh this page or click "Refresh Detection"
             </div>
           </div>
         )}
