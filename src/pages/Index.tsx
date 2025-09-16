@@ -23,7 +23,7 @@ export default function Index() {
   const [solanaManager] = useState(() => new SolanaGameManager());
   const [availableGames, setAvailableGames] = useState<GameRoom[]>([]);
   const [currentGame, setCurrentGame] = useState<GameRoom | null>(null);
-  const [entranceFee, setEntranceFee] = useState('0.01');
+  const [entranceFee, setEntranceFee] = useState('0.001');
   const [isLoading, setIsLoading] = useState(false);
   const [showStats, setShowStats] = useState(false);
   const [showRankings, setShowRankings] = useState(false);
@@ -31,8 +31,10 @@ export default function Index() {
   const [botDifficulty, setBotDifficulty] = useState<'easy' | 'medium' | 'hard'>('medium');
   const [playerRank, setPlayerRank] = useState<PlayerRank | null>(null);
 
-  // Load available games
+  // Load available games only when wallet is connected and not in a game
   useEffect(() => {
+    if (!walletState.connected || currentGame) return;
+
     const loadGames = async () => {
       try {
         const games = await solanaManager.getAvailableGames();
@@ -43,10 +45,13 @@ export default function Index() {
       }
     };
 
+    // Load immediately
     loadGames();
-    const interval = setInterval(loadGames, 5000); // Refresh every 5 seconds
+    
+    // Then refresh every 10 seconds (reduced frequency)
+    const interval = setInterval(loadGames, 10000);
     return () => clearInterval(interval);
-  }, [solanaManager]);
+  }, [solanaManager, walletState.connected, currentGame]);
 
   // Load player rank when wallet connected
   useEffect(() => {
@@ -90,6 +95,8 @@ export default function Index() {
 
     setIsLoading(true);
     try {
+      // Pass the wallet state to the solana manager
+      solanaManager.setWalletState(walletState);
       const gameRoom = await solanaManager.createGame(walletState.publicKey, fee);
       setCurrentGame(gameRoom);
       setGameMode('multiplayer');
@@ -110,6 +117,8 @@ export default function Index() {
 
     setIsLoading(true);
     try {
+      // Pass the wallet state to the solana manager
+      solanaManager.setWalletState(walletState);
       const gameRoom = await solanaManager.joinGame(gameId, walletState.publicKey);
       setCurrentGame(gameRoom);
       setGameMode('multiplayer');
@@ -177,10 +186,15 @@ export default function Index() {
     
     setCurrentGame(null);
     setGameMode('multiplayer');
-    // Refresh available games
-    solanaManager.getAvailableGames().then(games => {
-      setAvailableGames(games || []);
-    });
+    
+    // Refresh available games only if wallet is connected
+    if (walletState.connected) {
+      solanaManager.getAvailableGames().then(games => {
+        setAvailableGames(games || []);
+      }).catch(error => {
+        console.error('Error refreshing games:', error);
+      });
+    }
   };
 
   const formatAddress = (address: string) => {
@@ -444,7 +458,7 @@ export default function Index() {
                       min="0.001"
                       value={entranceFee}
                       onChange={(e) => setEntranceFee(e.target.value)}
-                      placeholder="0.01"
+                      placeholder="0.001"
                     />
                     <p className="text-xs text-gray-500">
                       Your balance: {walletState.balance.toFixed(4)} SOL
