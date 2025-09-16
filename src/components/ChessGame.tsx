@@ -2,452 +2,511 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Clock, User, Bot, Trophy, AlertCircle } from 'lucide-react';
-import ChessBoard from './ChessBoard';
-import { ChessGame as ChessGameLogic, PieceColor, ChessPosition } from '@/lib/chess-logic';
-import { SolanaGameManager, GameResult, WalletState, GameRoom } from '@/lib/solana-integration';
+import { Separator } from '@/components/ui/separator';
+import { Crown, Users, Clock, ArrowLeft, Flag, HandHeart, Bot } from 'lucide-react';
 import { toast } from 'sonner';
-
-// Generate unique game ID
-const generateGameId = (): string => {
-  return `chess_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-};
-
-type BotDifficulty = 'easy' | 'medium' | 'hard';
-type GameMode = 'bot' | 'multiplayer';
+import ChessBoard from './ChessBoard';
+import GameResults from './GameResults';
+import { 
+  GameState, 
+  ChessPosition, 
+  initializeGame, 
+  makeMove, 
+  getValidMoves, 
+  isGameOver, 
+  getGameResult 
+} from '@/lib/chess-logic';
+import { SolanaGameManager, GameRoom, WalletState } from '@/lib/solana-integration';
 
 interface ChessGameProps {
-  gameMode: GameMode;
-  botDifficulty?: BotDifficulty;
+  gameMode: 'multiplayer' | 'bot';
   gameRoom?: GameRoom | null;
+  botDifficulty?: 'easy' | 'medium' | 'hard';
   walletState: WalletState;
-  onGameEnd: (result: 'win' | 'lose' | 'draw', winner?: string) => void;
+  onGameEnd: () => void;
 }
 
-export default function ChessGame({ 
-  gameMode, 
-  botDifficulty = 'medium', 
-  gameRoom, 
-  walletState,
-  onGameEnd 
-}: ChessGameProps) {
-  const [game] = useState(() => new ChessGameLogic());
-  const [gameState, setGameState] = useState(game.getGameState());
+export default function ChessGame({ gameMode, gameRoom, botDifficulty = 'medium', walletState, onGameEnd }: ChessGameProps) {
+  const [gameState, setGameState] = useState<GameState | null>(null);
   const [selectedSquare, setSelectedSquare] = useState<ChessPosition | null>(null);
   const [validMoves, setValidMoves] = useState<ChessPosition[]>([]);
-  const [gameStatus, setGameStatus] = useState<'playing' | 'checkmate' | 'stalemate' | 'draw'>('playing');
-  const [winner, setWinner] = useState<PieceColor | null>(null);
+  const [gameResult, setGameResult] = useState<string | null>(null);
+  const [isPlayerTurn, setIsPlayerTurn] = useState(false);
+  const [playerColor, setPlayerColor] = useState<'white' | 'black'>('white');
   const [moveHistory, setMoveHistory] = useState<string[]>([]);
-  const [whiteTime, setWhiteTime] = useState(600); // 10 minutes in seconds
-  const [blackTime, setBlackTime] = useState(600);
-  const [isTimerActive, setIsTimerActive] = useState(true);
-  const [gameId] = useState(() => generateGameId());
-  const [isBotThinking, setIsBotThinking] = useState(false);
+  const [gameStarted, setGameStarted] = useState(false);
+  const [solanaManager] = useState(() => new SolanaGameManager());
 
-  // Timer effect
+  // Initialize game
   useEffect(() => {
-    if (!isTimerActive || gameStatus !== 'playing') return;
-
-    const interval = setInterval(() => {
-      if (gameState.currentPlayer === 'white') {
-        setWhiteTime(prev => {
-          if (prev <= 1) {
-            setGameStatus('checkmate');
-            setWinner('black');
-            setIsTimerActive(false);
-            handleGameEnd('lose', gameRoom?.opponent || 'bot');
-            return 0;
-          }
-          return prev - 1;
-        });
-      } else {
-        setBlackTime(prev => {
-          if (prev <= 1) {
-            setGameStatus('checkmate');
-            setWinner('white');
-            setIsTimerActive(false);
-            handleGameEnd('win', walletState.publicKey || 'player');
-            return 0;
-          }
-          return prev - 1;
-        });
-      }
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [gameState.currentPlayer, isTimerActive, gameStatus]);
-
-  const formatTime = (seconds: number): string => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-  };
-
-  const getValidMovesForPosition = (position: ChessPosition): ChessPosition[] => {
-    // Get all valid moves from the game state
-    const allMoves = game.getAllValidMoves(gameState.currentPlayer);
-    
-    // Filter moves that start from the selected position
-    return allMoves
-      .filter(move => move.from.row === position.row && move.from.col === position.col)
-      .map(move => move.to);
-  };
-
-  const makeBotMove = useCallback(async () => {
-    if (gameStatus !== 'playing' || gameState.currentPlayer !== 'black' || gameMode !== 'bot') {
-      return;
-    }
-
-    setIsBotThinking(true);
-    
-    // Add a delay to simulate bot thinking
-    await new Promise(resolve => setTimeout(resolve, 800 + Math.random() * 1200));
-
-    const allPossibleMoves = game.getAllValidMoves('black');
-
-    if (allPossibleMoves.length === 0) {
-      setIsBotThinking(false);
-      return;
-    }
-
-    // Simple bot logic based on difficulty
-    let selectedMove;
-    
-    if (botDifficulty === 'easy') {
-      // Random move
-      selectedMove = allPossibleMoves[Math.floor(Math.random() * allPossibleMoves.length)];
-    } else if (botDifficulty === 'medium') {
-      // Prefer captures, otherwise random
-      const captureMoves = allPossibleMoves.filter(move => {
-        const targetPiece = gameState.board[move.to.row][move.to.col];
-        return targetPiece && targetPiece.color === 'white';
-      });
-      
-      selectedMove = captureMoves.length > 0 
-        ? captureMoves[Math.floor(Math.random() * captureMoves.length)]
-        : allPossibleMoves[Math.floor(Math.random() * allPossibleMoves.length)];
-    } else {
-      // Hard: More strategic (still simplified)
-      const captureMoves = allPossibleMoves.filter(move => {
-        const targetPiece = gameState.board[move.to.row][move.to.col];
-        return targetPiece && targetPiece.color === 'white';
-      });
-      
-      const centerMoves = allPossibleMoves.filter(move => {
-        const { row, col } = move.to;
-        return (col === 3 || col === 4) && (row === 3 || row === 4);
-      });
-      
-      selectedMove = captureMoves.length > 0 
-        ? captureMoves[Math.floor(Math.random() * captureMoves.length)]
-        : centerMoves.length > 0 
-        ? centerMoves[Math.floor(Math.random() * centerMoves.length)]
-        : allPossibleMoves[Math.floor(Math.random() * allPossibleMoves.length)];
-    }
-
-    // Make the bot move
-    const moveResult = game.makeMove(selectedMove.from, selectedMove.to);
-    
-    if (moveResult) {
-      const newGameState = game.getGameState();
-      setGameState(newGameState);
-      
-      // Add move to history
-      const moveNotation = `${String.fromCharCode(97 + selectedMove.from.col)}${8 - selectedMove.from.row}-${String.fromCharCode(97 + selectedMove.to.col)}${8 - selectedMove.to.row}`;
-      setMoveHistory(prev => [...prev, `Bot: ${moveNotation}`]);
-      
-      // Check game status
-      if (newGameState.gameStatus === 'checkmate') {
-        setGameStatus('checkmate');
-        setWinner(newGameState.winner);
-        setIsTimerActive(false);
-        handleGameEnd('lose', 'bot');
-      } else if (newGameState.gameStatus === 'stalemate') {
-        setGameStatus('stalemate');
-        setIsTimerActive(false);
-        handleGameEnd('draw');
-      } else if (newGameState.gameStatus === 'draw') {
-        setGameStatus('draw');
-        setIsTimerActive(false);
-        handleGameEnd('draw');
-      }
-    }
-    
-    setIsBotThinking(false);
-  }, [gameState, gameStatus, botDifficulty, game, gameMode]);
-
-  // Effect to trigger bot moves
-  useEffect(() => {
-    if (gameMode === 'bot' && gameState.currentPlayer === 'black' && gameStatus === 'playing' && !isBotThinking) {
-      makeBotMove();
-    }
-  }, [gameState.currentPlayer, gameMode, gameStatus, isBotThinking, makeBotMove]);
-
-  const handleSquareClick = useCallback((position: ChessPosition) => {
-    if (gameStatus !== 'playing' || isBotThinking) return;
-    
-    // In bot mode, only allow white pieces to be moved by human
-    if (gameMode === 'bot' && gameState.currentPlayer === 'black') {
-      toast.error("Wait for bot to move!");
-      return;
-    }
-    
-    // In multiplayer, only allow moves for the current player
-    if (gameMode === 'multiplayer' && gameRoom) {
-      const isPlayerWhite = gameRoom.creator === walletState.publicKey;
-      const isPlayerTurn = (isPlayerWhite && gameState.currentPlayer === 'white') || 
-                          (!isPlayerWhite && gameState.currentPlayer === 'black');
-      
-      if (!isPlayerTurn) {
-        toast.error("It's not your turn!");
+    try {
+      const initialState = initializeGame();
+      if (!initialState || !initialState.board) {
+        console.error('Failed to initialize game state');
+        toast.error('Failed to initialize chess game');
         return;
       }
-    }
-
-    if (selectedSquare) {
-      // Try to make a move
-      const moveResult = game.makeMove(selectedSquare, position);
       
-      if (moveResult) {
-        const newGameState = game.getGameState();
+      setGameState(initialState);
+      
+      if (gameMode === 'multiplayer' && gameRoom) {
+        // Determine player color for multiplayer
+        const isCreator = gameRoom.creator === walletState.publicKey;
+        const color = isCreator ? 'white' : 'black';
+        setPlayerColor(color);
+        setIsPlayerTurn(color === 'white');
+      } else {
+        // Bot game - player is always white
+        setPlayerColor('white');
+        setIsPlayerTurn(true);
+      }
+      
+      setGameStarted(true);
+      
+      console.log('Game initialized:', { 
+        gameMode,
+        playerColor: gameMode === 'bot' ? 'white' : (gameRoom?.creator === walletState.publicKey ? 'white' : 'black'),
+        isPlayerTurn: gameMode === 'bot' ? true : (gameRoom?.creator === walletState.publicKey),
+        gameState: initialState 
+      });
+    } catch (error) {
+      console.error('Error initializing game:', error);
+      toast.error('Failed to initialize chess game');
+    }
+  }, [gameMode, gameRoom, walletState.publicKey]);
+
+  // Check for game over
+  useEffect(() => {
+    if (!gameState || !gameStarted) return;
+
+    try {
+      const gameOverResult = isGameOver(gameState);
+      if (gameOverResult.isGameOver) {
+        setGameResult(gameOverResult.result);
+        handleGameEnd(gameOverResult.result);
+      }
+    } catch (error) {
+      console.error('Error checking game over:', error);
+    }
+  }, [gameState, gameStarted]);
+
+  // Bot move logic
+  useEffect(() => {
+    if (gameMode === 'bot' && gameState && !isPlayerTurn && !gameResult && gameStarted) {
+      // Bot makes a move after a short delay
+      const botMoveTimer = setTimeout(() => {
+        makeBotMove();
+      }, 1000);
+
+      return () => clearTimeout(botMoveTimer);
+    }
+  }, [gameMode, gameState, isPlayerTurn, gameResult, gameStarted]);
+
+  const makeBotMove = () => {
+    if (!gameState) return;
+
+    try {
+      // Get all possible moves for the bot (black pieces)
+      const allMoves: { from: ChessPosition; to: ChessPosition }[] = [];
+      
+      for (let row = 0; row < 8; row++) {
+        for (let col = 0; col < 8; col++) {
+          const piece = gameState.board[row][col];
+          if (piece && piece.color === 'black') {
+            const moves = getValidMoves(gameState, { row, col });
+            moves.forEach(move => {
+              allMoves.push({ from: { row, col }, to: move });
+            });
+          }
+        }
+      }
+
+      if (allMoves.length === 0) return;
+
+      let selectedMove;
+
+      switch (botDifficulty) {
+        case 'easy':
+          // Random move
+          selectedMove = allMoves[Math.floor(Math.random() * allMoves.length)];
+          break;
+        
+        case 'medium':
+          // Prefer captures, otherwise random
+          const captureMoves = allMoves.filter(move => 
+            gameState.board[move.to.row][move.to.col] !== null
+          );
+          selectedMove = captureMoves.length > 0 
+            ? captureMoves[Math.floor(Math.random() * captureMoves.length)]
+            : allMoves[Math.floor(Math.random() * allMoves.length)];
+          break;
+        
+        case 'hard':
+          // Advanced strategy: prefer center control, captures, and piece development
+          const scoredMoves = allMoves.map(move => {
+            let score = 0;
+            
+            // Prefer captures
+            if (gameState.board[move.to.row][move.to.col]) {
+              score += 10;
+            }
+            
+            // Prefer center squares
+            if ((move.to.row >= 3 && move.to.row <= 4) && (move.to.col >= 3 && move.to.col <= 4)) {
+              score += 5;
+            }
+            
+            // Prefer moving pieces forward
+            if (move.to.row > move.from.row) {
+              score += 2;
+            }
+            
+            return { move, score };
+          });
+          
+          const maxScore = Math.max(...scoredMoves.map(m => m.score));
+          const bestMoves = scoredMoves.filter(m => m.score === maxScore);
+          selectedMove = bestMoves[Math.floor(Math.random() * bestMoves.length)].move;
+          break;
+        
+        default:
+          selectedMove = allMoves[Math.floor(Math.random() * allMoves.length)];
+      }
+
+      // Make the bot move
+      const newGameState = makeMove(gameState, selectedMove.from, selectedMove.to);
+      if (newGameState) {
         setGameState(newGameState);
-        setSelectedSquare(null);
-        setValidMoves([]);
+        setIsPlayerTurn(true);
         
         // Add move to history
-        const moveNotation = `${String.fromCharCode(97 + selectedSquare.col)}${8 - selectedSquare.row}-${String.fromCharCode(97 + position.col)}${8 - position.row}`;
+        const moveNotation = `${String.fromCharCode(97 + selectedMove.from.col)}${8 - selectedMove.from.row}-${String.fromCharCode(97 + selectedMove.to.col)}${8 - selectedMove.to.row}`;
         setMoveHistory(prev => [...prev, moveNotation]);
         
-        // Check game status
-        if (newGameState.gameStatus === 'checkmate') {
-          setGameStatus('checkmate');
-          setWinner(newGameState.winner);
-          setIsTimerActive(false);
-          const result = newGameState.winner === 'white' ? 'win' : 'lose';
-          const gameWinner = result === 'win' ? walletState.publicKey || 'player' : (gameRoom?.opponent || 'bot');
-          handleGameEnd(result, gameWinner);
-        } else if (newGameState.gameStatus === 'stalemate') {
-          setGameStatus('stalemate');
-          setIsTimerActive(false);
-          handleGameEnd('draw');
-        } else if (newGameState.gameStatus === 'draw') {
-          setGameStatus('draw');
-          setIsTimerActive(false);
-          handleGameEnd('draw');
+        console.log(`Bot (${botDifficulty}) made move: ${moveNotation}`);
+      }
+    } catch (error) {
+      console.error('Error making bot move:', error);
+    }
+  };
+
+  const handleGameEnd = async (result: string) => {
+    try {
+      if (gameMode === 'bot' && walletState.publicKey) {
+        // Record bot game result in stats
+        let gameResult: 'win' | 'loss' | 'draw' = 'draw';
+        
+        if (result.includes('checkmate')) {
+          const winnerColor = result.includes('White') ? 'white' : 'black';
+          gameResult = winnerColor === playerColor ? 'win' : 'loss';
+        } else if (result.includes('draw') || result.includes('stalemate')) {
+          gameResult = 'draw';
         }
-        // Note: Bot move will be triggered by useEffect when currentPlayer changes to 'black'
+        
+        await solanaManager.recordBotGameResult(walletState.publicKey, gameResult);
+        console.log(`Bot game result recorded: ${gameResult}`);
+        
+      } else if (gameMode === 'multiplayer' && gameRoom) {
+        // Handle multiplayer game completion
+        let winner = '';
+        let gameResult: 'win' | 'loss' | 'draw' = 'draw';
+
+        if (result.includes('checkmate')) {
+          const winnerColor = result.includes('White') ? 'white' : 'black';
+          winner = winnerColor === playerColor ? walletState.publicKey! : (gameRoom.opponent || gameRoom.creator);
+          gameResult = winnerColor === playerColor ? 'win' : 'loss';
+        } else if (result.includes('draw') || result.includes('stalemate')) {
+          gameResult = 'draw';
+          winner = 'draw';
+        }
+
+        await solanaManager.completeGame(gameRoom.id, winner, gameResult);
+      }
+      
+      toast.success(`Game ended: ${result}`);
+    } catch (error) {
+      console.error('Error handling game end:', error);
+      toast.error('Error processing game result');
+    }
+  };
+
+  const handleSquareClick = useCallback((position: ChessPosition) => {
+    if (!gameState || !isPlayerTurn || gameResult) return;
+
+    try {
+      if (selectedSquare) {
+        // Try to make a move
+        if (validMoves.some(move => move.row === position.row && move.col === position.col)) {
+          const newGameState = makeMove(gameState, selectedSquare, position);
+          if (newGameState) {
+            setGameState(newGameState);
+            setSelectedSquare(null);
+            setValidMoves([]);
+            setIsPlayerTurn(gameMode === 'multiplayer' ? false : false); // In bot mode, bot will move next
+            
+            // Add move to history
+            const moveNotation = `${String.fromCharCode(97 + selectedSquare.col)}${8 - selectedSquare.row}-${String.fromCharCode(97 + position.col)}${8 - position.row}`;
+            setMoveHistory(prev => [...prev, moveNotation]);
+            
+            console.log(`Player made move: ${moveNotation}`);
+            
+            // In multiplayer mode, simulate opponent move after delay (for testing)
+            if (gameMode === 'multiplayer') {
+              setTimeout(() => {
+                setIsPlayerTurn(true); // Give turn back for testing
+              }, 2000);
+            }
+          } else {
+            toast.error('Invalid move');
+          }
+        } else {
+          // Select new piece
+          selectPiece(position);
+        }
       } else {
-        toast.error('Invalid move');
+        // Select a piece
+        selectPiece(position);
+      }
+    } catch (error) {
+      console.error('Error handling square click:', error);
+      toast.error('Error making move');
+    }
+  }, [gameState, selectedSquare, validMoves, isPlayerTurn, gameResult, playerColor, gameMode]);
+
+  const selectPiece = (position: ChessPosition) => {
+    if (!gameState || !gameState.board) return;
+
+    try {
+      const piece = gameState.board[position.row]?.[position.col];
+      if (piece && piece.color === playerColor) {
+        setSelectedSquare(position);
+        const moves = getValidMoves(gameState, position);
+        setValidMoves(Array.isArray(moves) ? moves : []);
+      } else {
         setSelectedSquare(null);
         setValidMoves([]);
       }
-    } else {
-      // Select a piece - only allow selection of current player's pieces
-      const piece = gameState.board[position.row][position.col];
-      
-      if (piece && piece.color === gameState.currentPlayer) {
-        // In bot mode, only allow white pieces to be selected
-        if (gameMode === 'bot' && piece.color === 'black') {
-          toast.error("You can only move white pieces!");
-          return;
-        }
-        
-        setSelectedSquare(position);
-        const moves = getValidMovesForPosition(position);
-        setValidMoves(moves);
-      }
-    }
-  }, [selectedSquare, gameState, gameStatus, gameMode, gameRoom, walletState.publicKey, isBotThinking]);
-
-  const handleGameEnd = async (result: 'win' | 'lose' | 'draw', gameWinner?: string) => {
-    try {
-      // Record game result
-      const gameResult: GameResult = {
-        winner: result === 'win' ? 'white' : result === 'lose' ? 'black' : 'draw',
-        moves: moveHistory.length,
-        timestamp: Date.now(),
-        whitePlayer: walletState.publicKey || 'player',
-        blackPlayer: gameRoom?.opponent || 'bot'
-      };
-
-      // Store result locally
-      const existingResults = JSON.parse(localStorage.getItem('chess_game_results') || '[]');
-      existingResults.push(gameResult);
-      localStorage.setItem('chess_game_results', JSON.stringify(existingResults));
-
-      onGameEnd(result, gameWinner);
     } catch (error) {
-      console.error('Error handling game end:', error);
-      onGameEnd(result, gameWinner);
+      console.error('Error selecting piece:', error);
+      setSelectedSquare(null);
+      setValidMoves([]);
     }
   };
 
-  const handleResign = () => {
-    setGameStatus('checkmate');
-    setWinner(gameState.currentPlayer === 'white' ? 'black' : 'white');
-    setIsTimerActive(false);
-    const result = gameState.currentPlayer === 'white' ? 'lose' : 'win';
-    const gameWinner = result === 'win' ? walletState.publicKey || 'player' : (gameRoom?.opponent || 'bot');
-    handleGameEnd(result, gameWinner);
-  };
-
-  const getStatusMessage = () => {
-    if (isBotThinking) {
-      return `Bot is thinking...`;
-    } else if (gameStatus === 'checkmate') {
-      return winner === 'white' ? 'White wins by checkmate!' : 'Black wins by checkmate!';
-    } else if (gameStatus === 'stalemate') {
-      return 'Game ended in stalemate!';
-    } else if (gameStatus === 'draw') {
-      return 'Game ended in a draw!';
-    } else if (gameState.gameStatus === 'check') {
-      return `${gameState.currentPlayer === 'white' ? 'White' : 'Black'} is in check!`;
-    } else {
-      if (gameMode === 'bot') {
-        return gameState.currentPlayer === 'white' ? 'Your turn (White)' : 'Bot is thinking...';
-      } else {
-        return `${gameState.currentPlayer === 'white' ? 'White' : 'Black'} to move`;
+  const handleResign = async () => {
+    try {
+      if (gameMode === 'bot' && walletState.publicKey) {
+        // Record resignation as loss in bot game
+        await solanaManager.recordBotGameResult(walletState.publicKey, 'loss');
+        setGameResult('You resigned');
+        toast.info('You resigned from the game');
+      } else if (gameMode === 'multiplayer' && gameRoom) {
+        const opponent = gameRoom.creator === walletState.publicKey ? gameRoom.opponent : gameRoom.creator;
+        await solanaManager.completeGame(gameRoom.id, opponent || '', 'loss');
+        setGameResult('You resigned');
+        toast.info('You resigned from the game');
       }
+    } catch (error) {
+      console.error('Error resigning:', error);
+      toast.error('Error resigning from game');
     }
   };
 
-  const getPlayerInfo = (color: 'white' | 'black') => {
-    if (gameMode === 'bot') {
-      return color === 'white' ? 'You' : `${botDifficulty} Bot`;
-    } else if (gameRoom) {
-      const isCreatorWhite = gameRoom.creator === walletState.publicKey;
-      if (color === 'white') {
-        return isCreatorWhite ? 'You' : (gameRoom.opponent ? 'Opponent' : 'Waiting...');
-      } else {
-        return !isCreatorWhite ? 'You' : (gameRoom.opponent ? 'Opponent' : 'Waiting...');
-      }
-    }
-    return color === 'white' ? 'White' : 'Black';
+  const handleOfferDraw = () => {
+    toast.info('Draw offer sent to opponent (feature coming soon)');
   };
+
+  const formatAddress = (address: string) => {
+    return `${address.slice(0, 6)}...${address.slice(-4)}`;
+  };
+
+  if (!gameState) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-lg">Loading chess game...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (gameResult) {
+    return (
+      <GameResults
+        result={gameResult}
+        playerColor={playerColor}
+        gameRoom={gameRoom}
+        moveHistory={moveHistory}
+        onBackToLobby={onGameEnd}
+        gameMode={gameMode}
+        botDifficulty={botDifficulty}
+      />
+    );
+  }
 
   return (
-    <div className="space-y-4">
-      {/* Game Status */}
-      <Card>
-        <CardContent className="p-4">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              {gameStatus !== 'playing' ? (
-                <Trophy className="h-5 w-5 text-yellow-600" />
-              ) : gameState.gameStatus === 'check' ? (
-                <AlertCircle className="h-5 w-5 text-red-600" />
-              ) : isBotThinking ? (
-                <Bot className="h-5 w-5 text-blue-600 animate-pulse" />
-              ) : (
-                <Clock className="h-5 w-5 text-blue-600" />
-              )}
-              <span className="font-medium">{getStatusMessage()}</span>
-            </div>
-            
-            {gameStatus === 'playing' && !isBotThinking && (
-              <Button variant="outline" size="sm" onClick={handleResign}>
-                Resign
-              </Button>
+    <div className="container mx-auto px-4 py-8">
+      <div className="max-w-6xl mx-auto">
+        {/* Header */}
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between mb-6 gap-4">
+          <Button 
+            variant="outline" 
+            onClick={onGameEnd}
+            className="flex items-center gap-2"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            Back to Lobby
+          </Button>
+          
+          <div className="flex items-center gap-2">
+            {gameMode === 'bot' ? (
+              <Badge variant="secondary" className="flex items-center gap-1">
+                <Bot className="h-3 w-3" />
+                vs {botDifficulty} Bot (Free)
+              </Badge>
+            ) : (
+              <>
+                <Badge variant="default" className="flex items-center gap-1">
+                  <Crown className="h-3 w-3" />
+                  {gameRoom?.entranceFee} SOL
+                </Badge>
+                <Badge variant="secondary">
+                  Prize: {((gameRoom?.entranceFee || 0) * 1.8).toFixed(4)} SOL
+                </Badge>
+              </>
             )}
           </div>
-        </CardContent>
-      </Card>
+        </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
-        {/* Player Info */}
-        <div className="lg:col-span-1 space-y-4">
-          {/* Black Player */}
-          <Card>
-            <CardContent className="p-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  {gameMode === 'bot' ? (
-                    <Bot className={`h-4 w-4 ${isBotThinking && gameState.currentPlayer === 'black' ? 'animate-pulse text-blue-600' : ''}`} />
-                  ) : (
-                    <User className="h-4 w-4" />
-                  )}
-                  <span className="font-medium">{getPlayerInfo('black')}</span>
-                  {isBotThinking && gameState.currentPlayer === 'black' && (
-                    <span className="text-xs text-blue-600">Thinking...</span>
-                  )}
-                </div>
-                <Badge variant={gameState.currentPlayer === 'black' ? 'default' : 'secondary'}>
-                  {formatTime(blackTime)}
-                </Badge>
-              </div>
-            </CardContent>
-          </Card>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Game Board */}
+          <div className="lg:col-span-2 flex justify-center">
+            <ChessBoard
+              gameState={gameState}
+              selectedSquare={selectedSquare}
+              validMoves={validMoves}
+              onSquareClick={handleSquareClick}
+              isFlipped={playerColor === 'black'}
+            />
+          </div>
 
-          {/* White Player */}
-          <Card>
-            <CardContent className="p-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <User className="h-4 w-4" />
-                  <span className="font-medium">{getPlayerInfo('white')}</span>
-                </div>
-                <Badge variant={gameState.currentPlayer === 'white' ? 'default' : 'secondary'}>
-                  {formatTime(whiteTime)}
-                </Badge>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Game Info */}
-          {gameRoom && (
+          {/* Game Info Sidebar */}
+          <div className="space-y-4">
+            {/* Players */}
             <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm">Game Info</CardTitle>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-lg">
+                  <Users className="h-5 w-5" />
+                  Players
+                </CardTitle>
               </CardHeader>
-              <CardContent className="p-4 pt-0 space-y-2">
-                <div className="flex justify-between text-sm">
-                  <span>Entrance Fee:</span>
-                  <span className="font-medium">{gameRoom.entranceFee} SOL</span>
+              <CardContent className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-3 h-3 bg-white border border-gray-400 rounded-full"></div>
+                    <span className="text-sm">White</span>
+                  </div>
+                  <Badge variant="outline" className="text-xs">
+                    {gameMode === 'bot' 
+                      ? 'You' 
+                      : (gameRoom?.creator === walletState.publicKey ? 'You' : formatAddress(gameRoom?.creator || ''))
+                    }
+                  </Badge>
                 </div>
-                <div className="flex justify-between text-sm">
-                  <span>Prize Pool:</span>
-                  <span className="font-medium">{(gameRoom.entranceFee * 2).toFixed(4)} SOL</span>
-                </div>
-                <div className="flex justify-between text-sm">
-                  <span>Winner Gets:</span>
-                  <span className="font-medium text-green-600">{(gameRoom.entranceFee * 1.8).toFixed(4)} SOL</span>
+                
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-3 h-3 bg-gray-800 rounded-full"></div>
+                    <span className="text-sm">Black</span>
+                  </div>
+                  <Badge variant="outline" className="text-xs">
+                    {gameMode === 'bot' 
+                      ? `${botDifficulty} Bot`
+                      : (gameRoom?.opponent === walletState.publicKey ? 'You' : 
+                         gameRoom?.opponent ? formatAddress(gameRoom.opponent) : 'Waiting...')
+                    }
+                  </Badge>
                 </div>
               </CardContent>
             </Card>
-          )}
-        </div>
 
-        {/* Chess Board */}
-        <div className="lg:col-span-2">
-          <ChessBoard
-            gameState={gameState}
-            selectedSquare={selectedSquare}
-            validMoves={validMoves}
-            onSquareClick={handleSquareClick}
-            isFlipped={gameMode === 'multiplayer' && gameRoom?.creator !== walletState.publicKey}
-          />
-        </div>
+            {/* Game Status */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-lg">
+                  <Clock className="h-5 w-5" />
+                  Game Status
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="text-center">
+                  <Badge 
+                    variant={isPlayerTurn ? "default" : "secondary"}
+                    className="text-sm"
+                  >
+                    {isPlayerTurn ? `Your turn (${playerColor})` : 
+                     gameMode === 'bot' ? "Bot's turn" : "Opponent's turn"}
+                  </Badge>
+                </div>
+                
+                <Separator />
+                
+                <div className="text-sm text-muted-foreground">
+                  <div>Moves: {moveHistory.length}</div>
+                  <div>Your color: {playerColor}</div>
+                  <div>Mode: {gameMode === 'bot' ? `Bot (${botDifficulty})` : 'Multiplayer'}</div>
+                </div>
+              </CardContent>
+            </Card>
 
-        {/* Move History */}
-        <div className="lg:col-span-1">
-          <Card className="h-full">
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm">Move History</CardTitle>
-            </CardHeader>
-            <CardContent className="p-4 pt-0">
-              <div className="space-y-1 max-h-96 overflow-y-auto">
-                {moveHistory.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">No moves yet</p>
-                ) : (
-                  moveHistory.map((move, index) => (
-                    <div key={index} className="text-xs font-mono">
-                      {index + 1}. {move}
-                    </div>
-                  ))
+            {/* Game Actions */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-lg">Actions</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                {gameMode === 'multiplayer' && (
+                  <Button 
+                    variant="outline" 
+                    onClick={handleOfferDraw}
+                    className="w-full flex items-center gap-2"
+                    disabled={!isPlayerTurn}
+                  >
+                    <HandHeart className="h-4 w-4" />
+                    Offer Draw
+                  </Button>
                 )}
-              </div>
-            </CardContent>
-          </Card>
+                
+                <Button 
+                  variant="destructive" 
+                  onClick={handleResign}
+                  className="w-full flex items-center gap-2"
+                >
+                  <Flag className="h-4 w-4" />
+                  Resign
+                </Button>
+              </CardContent>
+            </Card>
+
+            {/* Move History */}
+            {moveHistory.length > 0 && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-lg">Move History</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="max-h-40 overflow-y-auto text-sm font-mono">
+                    {moveHistory.map((move, index) => (
+                      <div key={index} className="py-1">
+                        {Math.floor(index / 2) + 1}. {move}
+                      </div>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+          </div>
         </div>
       </div>
     </div>
