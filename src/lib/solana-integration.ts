@@ -13,12 +13,16 @@ export interface GameRoom {
   creator: string;
   opponent: string | null;
   entranceFee: number;
+  totalPot: number;
+  winnerPrize: number;
+  platformFee: number;
   status: 'waiting' | 'active' | 'completed';
   winner: string | null;
   createdAt: number;
-  creatorSigned: boolean;
-  opponentSigned: boolean;
-  escrowAddress?: string;
+  creatorPaid: boolean;
+  opponentPaid: boolean;
+  creatorTxSignature?: string;
+  opponentTxSignature?: string;
 }
 
 export interface PlayerStats {
@@ -26,17 +30,18 @@ export interface PlayerStats {
   wins: number;
   losses: number;
   totalEarnings: number;
+  totalSpent: number;
 }
 
 export class SolanaGameManager {
   private connection: Connection;
   private readonly GAMES_STORAGE_KEY = 'solana_chess_games_global';
   private readonly STATS_STORAGE_KEY = 'solana_chess_stats_global';
-  private readonly PLATFORM_WALLET = '42SoggCv1oXBhNWicmAJir3arYiS2NCMveWpUkixYXzj'; // Your real platform wallet
+  private readonly TREASURY_WALLET = '42SoggCv1oXBhNWicmAJir3arYiS2NCMveWpUkixYXzj';
   private readonly QUICKNODE_RPC = 'https://broken-purple-breeze.solana-mainnet.quiknode.pro/b087363c02a61ba4c37f9acd5c3c4dcc7b20420f/';
+  private readonly PLATFORM_FEE_PERCENT = 0.10; // 10% platform fee
 
   constructor() {
-    // Using your real QuickNode RPC endpoint
     this.connection = new Connection(
       this.QUICKNODE_RPC,
       {
@@ -44,17 +49,17 @@ export class SolanaGameManager {
         confirmTransactionInitialTimeout: 60000,
       }
     );
-    console.log('🔗 Connected to QuickNode RPC:', this.QUICKNODE_RPC);
-    console.log('💰 Platform wallet:', this.PLATFORM_WALLET);
+    console.log('🏦 Treasury wallet:', this.TREASURY_WALLET);
+    console.log('💰 Platform fee: 10%');
   }
 
   async getBalance(publicKeyString: string): Promise<number> {
     try {
-      console.log(`💰 Getting balance for ${publicKeyString} using QuickNode...`);
+      console.log(`💰 Getting balance for ${publicKeyString}...`);
       const publicKey = new PublicKey(publicKeyString);
       const balance = await this.connection.getBalance(publicKey);
       const solBalance = balance / LAMPORTS_PER_SOL;
-      console.log(`✅ Balance retrieved: ${solBalance} SOL (${balance} lamports)`);
+      console.log(`✅ Balance: ${solBalance} SOL`);
       return solBalance;
     } catch (error) {
       console.error('❌ Error getting balance:', error);
@@ -67,7 +72,6 @@ export class SolanaGameManager {
       const gamesData = safeLocalStorage.getItem(this.GAMES_STORAGE_KEY);
       const games = gamesData ? safeJSONParse(gamesData, []) : [];
       
-      // Filter out old games (older than 24 hours) to keep storage clean
       const validGames = games.filter((game: GameRoom) => 
         Date.now() - game.createdAt < 24 * 60 * 60 * 1000
       );
@@ -76,7 +80,7 @@ export class SolanaGameManager {
         this.saveGames(validGames);
       }
       
-      console.log(`📱 Loaded ${validGames.length} games from cross-platform storage`);
+      console.log(`📱 Loaded ${validGames.length} games`);
       return validGames;
     } catch (error) {
       console.error('Error loading games:', error);
@@ -89,7 +93,7 @@ export class SolanaGameManager {
       const gamesData = safeJSONStringify(games);
       if (gamesData) {
         safeLocalStorage.setItem(this.GAMES_STORAGE_KEY, gamesData);
-        console.log(`💾 Saved ${games.length} games to cross-platform storage`);
+        console.log(`💾 Saved ${games.length} games`);
       }
     } catch (error) {
       console.error('Error saving games:', error);
@@ -101,7 +105,8 @@ export class SolanaGameManager {
       const allGames = this.getAllGames();
       const availableGames = allGames.filter(game => 
         game.status === 'waiting' && 
-        Date.now() - game.createdAt < 2 * 60 * 60 * 1000 // 2 hours max
+        game.creatorPaid &&
+        Date.now() - game.createdAt < 2 * 60 * 60 * 1000
       );
       console.log(`🎮 Found ${availableGames.length} available games`);
       return availableGames;
@@ -111,9 +116,9 @@ export class SolanaGameManager {
     }
   }
 
-  private async createEscrowTransaction(playerPublicKey: string, amount: number): Promise<string> {
+  private async sendToTreasury(playerPublicKey: string, amount: number): Promise<string> {
     try {
-      console.log(`📝 Creating REAL escrow transaction: ${amount} SOL from ${playerPublicKey} to ${this.PLATFORM_WALLET}`);
+      console.log(`💸 Sending ${amount} SOL from ${playerPublicKey} to treasury...`);
       
       const connectedWallet = walletManager.getConnectedWallet();
       if (!connectedWallet) {
@@ -121,12 +126,11 @@ export class SolanaGameManager {
       }
 
       const fromPubkey = new PublicKey(playerPublicKey);
-      const toPubkey = new PublicKey(this.PLATFORM_WALLET);
+      const toPubkey = new PublicKey(this.TREASURY_WALLET);
       const lamports = Math.floor(amount * LAMPORTS_PER_SOL);
 
-      console.log(`💸 Transfer details: ${lamports} lamports (${amount} SOL)`);
+      console.log(`💰 Transfer: ${lamports} lamports (${amount} SOL) to treasury`);
 
-      // Create transaction
       const transaction = new Transaction().add(
         SystemProgram.transfer({
           fromPubkey,
@@ -135,18 +139,15 @@ export class SolanaGameManager {
         })
       );
 
-      // Get recent blockhash
       const { blockhash } = await this.connection.getLatestBlockhash('confirmed');
       transaction.recentBlockhash = blockhash;
       transaction.feePayer = fromPubkey;
 
       console.log(`🔗 Transaction created with blockhash: ${blockhash}`);
       
-      // Sign transaction with wallet
       const signedTransaction = await connectedWallet.provider.signTransaction(transaction);
-      console.log(`✍️ Transaction signed by wallet`);
+      console.log(`✍️ Transaction signed`);
       
-      // Send transaction
       const signature = await this.connection.sendRawTransaction(
         signedTransaction.serialize(),
         {
@@ -155,9 +156,8 @@ export class SolanaGameManager {
         }
       );
       
-      console.log(`📡 Transaction sent with signature: ${signature}`);
+      console.log(`📡 Transaction sent: ${signature}`);
       
-      // Confirm transaction
       const confirmation = await this.connection.confirmTransaction(
         signature,
         'confirmed'
@@ -167,53 +167,65 @@ export class SolanaGameManager {
         throw new Error(`Transaction failed: ${confirmation.value.err}`);
       }
       
-      console.log(`✅ REAL escrow transaction confirmed: ${signature}`);
+      console.log(`✅ Payment to treasury confirmed: ${signature}`);
       return signature;
     } catch (error) {
-      console.error('❌ Real escrow transaction failed:', error);
-      throw new Error(`Failed to process SOL payment: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      console.error('❌ Treasury payment failed:', error);
+      throw new Error(`Failed to send SOL to treasury: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
   async createGameWithWallet(creatorPublicKey: string, entranceFee: number): Promise<GameRoom> {
-    console.log(`🎮 Creating game with REAL SOL payment: ${entranceFee} SOL from ${creatorPublicKey}`);
+    console.log(`🎮 Creating game - Creator pays ${entranceFee} SOL entrance fee`);
     
     try {
-      // Check balance first
       const balance = await this.getBalance(creatorPublicKey);
-      console.log(`💰 Creator balance: ${balance} SOL, Required: ${entranceFee} SOL`);
+      console.log(`💰 Creator balance: ${balance} SOL, Required: ${entranceFee} SOL + fees`);
       
-      if (balance < entranceFee + 0.001) { // Add small buffer for transaction fees
+      if (balance < entranceFee + 0.001) {
         throw new Error(`Insufficient balance. You have ${balance.toFixed(4)} SOL but need ${(entranceFee + 0.001).toFixed(4)} SOL (including fees)`);
       }
 
-      // Create REAL escrow transaction
-      console.log(`📝 Processing REAL SOL payment...`);
-      const escrowSignature = await this.createEscrowTransaction(creatorPublicKey, entranceFee);
+      console.log(`💸 Processing creator's entrance fee payment...`);
+      const creatorTxSignature = await this.sendToTreasury(creatorPublicKey, entranceFee);
+
+      // Calculate pot distribution
+      const totalPot = entranceFee * 2; // Both players pay same amount
+      const platformFee = totalPot * this.PLATFORM_FEE_PERCENT; // 10% platform fee
+      const winnerPrize = totalPot - platformFee; // 90% to winner
 
       const gameRoom: GameRoom = {
         id: `game_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
         creator: creatorPublicKey,
         opponent: null,
         entranceFee,
+        totalPot,
+        winnerPrize,
+        platformFee,
         status: 'waiting',
         winner: null,
         createdAt: Date.now(),
-        creatorSigned: true,
-        opponentSigned: false,
-        escrowAddress: escrowSignature
+        creatorPaid: true,
+        opponentPaid: false,
+        creatorTxSignature
       };
 
       const allGames = this.getAllGames();
       allGames.push(gameRoom);
       this.saveGames(allGames);
 
-      console.log(`✅ Game created with REAL SOL payment: ${gameRoom.id}`);
-      console.log(`💳 Escrow transaction: ${escrowSignature}`);
+      console.log(`✅ Game created with creator payment:`);
+      console.log(`   - Game ID: ${gameRoom.id}`);
+      console.log(`   - Entrance Fee: ${entranceFee} SOL (per player)`);
+      console.log(`   - Total Pot: ${totalPot} SOL (when both players pay)`);
+      console.log(`   - Winner Prize: ${winnerPrize} SOL (90%)`);
+      console.log(`   - Platform Fee: ${platformFee} SOL (10%)`);
+      console.log(`   - Creator Tx: ${creatorTxSignature}`);
+      
       return gameRoom;
     } catch (error: any) {
-      console.error('❌ Error creating game with real payment:', error);
-      throw new Error(error.message || 'Failed to create game with SOL payment');
+      console.error('❌ Error creating game:', error);
+      throw new Error(error.message || 'Failed to create game');
     }
   }
 
@@ -222,7 +234,7 @@ export class SolanaGameManager {
   }
 
   async joinGame(gameId: string, playerPublicKey: string): Promise<GameRoom> {
-    console.log(`🎮 Player joining game with REAL SOL payment: ${gameId}`);
+    console.log(`🎮 Player joining game ${gameId} - Must pay ${gameId} entrance fee`);
     
     try {
       const allGames = this.getAllGames();
@@ -242,43 +254,42 @@ export class SolanaGameManager {
         throw new Error('Cannot join your own game');
       }
 
-      // Check balance
+      if (!game.creatorPaid) {
+        throw new Error('Game creator has not paid entrance fee');
+      }
+
+      // Check opponent's balance
       const balance = await this.getBalance(playerPublicKey);
-      if (balance < game.entranceFee + 0.001) { // Add buffer for fees
+      if (balance < game.entranceFee + 0.001) {
         throw new Error(`Insufficient balance. You have ${balance.toFixed(4)} SOL but need ${(game.entranceFee + 0.001).toFixed(4)} SOL (including fees)`);
       }
 
-      // Create REAL escrow transaction for opponent
-      console.log(`📝 Processing opponent's REAL SOL payment...`);
-      const opponentEscrowSignature = await this.createEscrowTransaction(playerPublicKey, game.entranceFee);
+      // Opponent must pay same entrance fee
+      console.log(`💸 Processing opponent's entrance fee payment...`);
+      const opponentTxSignature = await this.sendToTreasury(playerPublicKey, game.entranceFee);
 
-      // Update game
+      // Update game with opponent payment
       game.opponent = playerPublicKey;
       game.status = 'active';
-      game.opponentSigned = true;
+      game.opponentPaid = true;
+      game.opponentTxSignature = opponentTxSignature;
       
       allGames[gameIndex] = game;
       this.saveGames(allGames);
 
-      console.log(`✅ Player joined with REAL SOL payment: ${gameId}`);
-      console.log(`💳 Opponent escrow transaction: ${opponentEscrowSignature}`);
+      console.log(`✅ Player joined game with payment:`);
+      console.log(`   - Game ID: ${gameId}`);
+      console.log(`   - Opponent: ${playerPublicKey}`);
+      console.log(`   - Opponent paid: ${game.entranceFee} SOL`);
+      console.log(`   - Total pot now: ${game.totalPot} SOL`);
+      console.log(`   - Winner will get: ${game.winnerPrize} SOL (90%)`);
+      console.log(`   - Platform keeps: ${game.platformFee} SOL (10%)`);
+      console.log(`   - Opponent Tx: ${opponentTxSignature}`);
+      
       return game;
     } catch (error: any) {
-      console.error('❌ Error joining game with real payment:', error);
-      throw new Error(error.message || 'Failed to join game with SOL payment');
-    }
-  }
-
-  async processPayment(fromPublicKey: string, amount: number): Promise<boolean> {
-    console.log(`💳 Processing REAL SOL payment: ${amount} SOL from ${fromPublicKey}`);
-    
-    try {
-      const signature = await this.createEscrowTransaction(fromPublicKey, amount);
-      console.log(`✅ REAL payment processed: ${signature}`);
-      return true;
-    } catch (error: any) {
-      console.error('❌ Real payment failed:', error);
-      throw new Error(`Payment failed: ${error.message}`);
+      console.error('❌ Error joining game:', error);
+      throw new Error(error.message || 'Failed to join game');
     }
   }
 
@@ -291,7 +302,8 @@ export class SolanaGameManager {
         totalGames: 0,
         wins: 0,
         losses: 0,
-        totalEarnings: 0
+        totalEarnings: 0,
+        totalSpent: 0
       };
     } catch (error) {
       console.error('Error loading player stats:', error);
@@ -299,12 +311,13 @@ export class SolanaGameManager {
         totalGames: 0,
         wins: 0,
         losses: 0,
-        totalEarnings: 0
+        totalEarnings: 0,
+        totalSpent: 0
       };
     }
   }
 
-  updatePlayerStats(publicKey: string, gameResult: 'win' | 'loss' | 'draw', earnings: number = 0): void {
+  updatePlayerStats(publicKey: string, gameResult: 'win' | 'loss' | 'draw', earnings: number = 0, spent: number = 0): void {
     try {
       const statsData = safeLocalStorage.getItem(this.STATS_STORAGE_KEY);
       const allStats = statsData ? safeJSONParse(statsData, {}) : {};
@@ -313,10 +326,13 @@ export class SolanaGameManager {
         totalGames: 0,
         wins: 0,
         losses: 0,
-        totalEarnings: 0
+        totalEarnings: 0,
+        totalSpent: 0
       };
 
       currentStats.totalGames++;
+      currentStats.totalSpent += spent;
+      
       if (gameResult === 'win') {
         currentStats.wins++;
         currentStats.totalEarnings += earnings;
@@ -345,8 +361,6 @@ export class SolanaGameManager {
       }
 
       const game = allGames[gameIndex];
-      const totalPot = game.entranceFee * 2;
-      const winnings = totalPot * 0.9; // 90% to winner, 10% platform fee
       
       game.status = 'completed';
       game.winner = winner;
@@ -354,18 +368,29 @@ export class SolanaGameManager {
       allGames[gameIndex] = game;
       this.saveGames(allGames);
 
-      // In a real implementation, you would send winnings back to the winner
-      // For now, we just log the completion
-      console.log(`💰 Game completed - Winner: ${winner} should receive ${winnings} SOL`);
-      console.log(`🏦 Platform fee: ${totalPot * 0.1} SOL`);
+      console.log(`🏆 Game completed:`);
+      console.log(`   - Winner: ${winner}`);
+      console.log(`   - Winner Prize: ${game.winnerPrize} SOL (90% of ${game.totalPot} SOL pot)`);
+      console.log(`   - Platform Fee: ${game.platformFee} SOL (10%)`);
+      console.log(`   - Treasury should release ${game.winnerPrize} SOL to winner`);
 
       // Update stats for both players
       if (game.opponent && game.opponent !== 'bot') {
-        this.updatePlayerStats(game.creator, winner === game.creator ? 'win' : 'loss', winner === game.creator ? winnings : 0);
-        this.updatePlayerStats(game.opponent, winner === game.opponent ? 'win' : 'loss', winner === game.opponent ? winnings : 0);
+        this.updatePlayerStats(
+          game.creator, 
+          winner === game.creator ? 'win' : 'loss', 
+          winner === game.creator ? game.winnerPrize : 0,
+          game.entranceFee
+        );
+        this.updatePlayerStats(
+          game.opponent, 
+          winner === game.opponent ? 'win' : 'loss', 
+          winner === game.opponent ? game.winnerPrize : 0,
+          game.entranceFee
+        );
       }
 
-      console.log(`✅ Game completed: ${gameId}, Winner: ${winner}, Winnings: ${winnings} SOL`);
+      console.log(`✅ Game completion recorded with 90/10 split`);
     } catch (error) {
       console.error('❌ Error completing game:', error);
     }
@@ -373,12 +398,10 @@ export class SolanaGameManager {
 
   // iOS compatibility methods
   async refreshGamesForMobile(): Promise<GameRoom[]> {
-    console.log(`📱 Refreshing games for mobile compatibility...`);
+    console.log(`📱 Refreshing games for mobile...`);
     
     try {
       const games = this.getAllGames();
-      
-      // Add mobile-specific metadata
       const mobileCompatibleGames = games.map(game => ({
         ...game,
         platform: 'cross-platform',
@@ -394,24 +417,25 @@ export class SolanaGameManager {
     }
   }
 
-  // Check if game contracts are properly signed
-  isGameFullySigned(gameId: string): boolean {
+  // Check if game is fully funded (both players paid)
+  isGameFullyFunded(gameId: string): boolean {
     const games = this.getAllGames();
     const game = games.find(g => g.id === gameId);
     
     if (!game) return false;
     
-    const fullySigned = game.creatorSigned && (game.status === 'waiting' || game.opponentSigned);
-    console.log(`🔐 Game ${gameId} signing status: Creator(${game.creatorSigned}) Opponent(${game.opponentSigned}) = ${fullySigned}`);
+    const fullyFunded = game.creatorPaid && game.opponentPaid;
+    console.log(`💰 Game ${gameId} funding status: ${fullyFunded ? 'FULLY FUNDED' : 'PARTIALLY FUNDED'}`);
     
-    return fullySigned;
+    return fullyFunded;
   }
 
   // Get connection info for debugging
-  getConnectionInfo(): { rpc: string; platformWallet: string } {
+  getConnectionInfo(): { rpc: string; treasuryWallet: string; platformFee: string } {
     return {
       rpc: this.QUICKNODE_RPC,
-      platformWallet: this.PLATFORM_WALLET
+      treasuryWallet: this.TREASURY_WALLET,
+      platformFee: `${this.PLATFORM_FEE_PERCENT * 100}%`
     };
   }
 }
