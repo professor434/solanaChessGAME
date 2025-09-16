@@ -5,7 +5,7 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
-import { Wallet, Plus, Users, Crown, TrendingUp, Trophy, Gamepad2, Bot, Zap, Target, Brain, Medal, Star } from 'lucide-react';
+import { Wallet, Plus, Users, Crown, TrendingUp, Trophy, Gamepad2, Bot, Zap, Target, Brain, Medal, Star, Smartphone, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import WalletConnect from '@/components/WalletConnect';
 import ChessGame from '@/components/ChessGame';
@@ -30,14 +30,37 @@ export default function Index() {
   const [gameMode, setGameMode] = useState<'multiplayer' | 'bot'>('multiplayer');
   const [botDifficulty, setBotDifficulty] = useState<'easy' | 'medium' | 'hard'>('medium');
   const [playerRank, setPlayerRank] = useState<PlayerRank | null>(null);
+  const [isMobile, setIsMobile] = useState(false);
 
-  // Load available games only when wallet is connected and not in a game
+  // Detect mobile device
   useEffect(() => {
-    if (!walletState.connected || currentGame) return;
+    const checkMobile = () => {
+      const mobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+                    window.innerWidth <= 768;
+      setIsMobile(mobile);
+      console.log(`📱 Device detection: ${mobile ? 'Mobile' : 'Desktop'}`);
+    };
+    
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+    return () => window.removeEventListener('resize', checkMobile);
+  }, []);
+
+  // Load available games with mobile compatibility
+  useEffect(() => {
+    if (!walletState.connected) {
+      setAvailableGames([]);
+      return;
+    }
 
     const loadGames = async () => {
       try {
-        const games = await solanaManager.getAvailableGames();
+        let games;
+        if (isMobile) {
+          games = await solanaManager.refreshGamesForMobile();
+        } else {
+          games = await solanaManager.getAvailableGames();
+        }
         setAvailableGames(games || []);
       } catch (error) {
         console.error('Error loading games:', error);
@@ -45,13 +68,10 @@ export default function Index() {
       }
     };
 
-    // Load immediately
     loadGames();
-    
-    // Then refresh every 10 seconds (reduced frequency)
-    const interval = setInterval(loadGames, 10000);
+    const interval = setInterval(loadGames, isMobile ? 15000 : 10000); // Longer interval on mobile
     return () => clearInterval(interval);
-  }, [solanaManager, walletState.connected, currentGame]);
+  }, [solanaManager, walletState.connected, isMobile]);
 
   // Load player rank when wallet connected
   useEffect(() => {
@@ -95,12 +115,19 @@ export default function Index() {
 
     setIsLoading(true);
     try {
-      // Pass the wallet state to the solana manager
-      solanaManager.setWalletState(walletState);
-      const gameRoom = await solanaManager.createGame(walletState.publicKey, fee);
+      toast.info('Creating game and processing payment...', { duration: 3000 });
+      
+      const gameRoom = await solanaManager.createGameWithWallet(walletState.publicKey, fee);
+      
+      // Verify the game is properly signed
+      const isSigned = solanaManager.isGameFullySigned(gameRoom.id);
+      if (!isSigned) {
+        throw new Error('Game contract not properly signed');
+      }
+      
       setCurrentGame(gameRoom);
       setGameMode('multiplayer');
-      toast.success('Game created successfully!');
+      toast.success('🎮 Game created and contract signed! Waiting for opponent...');
     } catch (error: any) {
       console.error('Error creating game:', error);
       toast.error(error.message || 'Failed to create game');
@@ -117,12 +144,19 @@ export default function Index() {
 
     setIsLoading(true);
     try {
-      // Pass the wallet state to the solana manager
-      solanaManager.setWalletState(walletState);
+      toast.info('Joining game and processing payment...', { duration: 3000 });
+      
       const gameRoom = await solanaManager.joinGame(gameId, walletState.publicKey);
+      
+      // Verify both players have signed
+      const isSigned = solanaManager.isGameFullySigned(gameRoom.id);
+      if (!isSigned) {
+        throw new Error('Game contracts not fully signed');
+      }
+      
       setCurrentGame(gameRoom);
       setGameMode('multiplayer');
-      toast.success('Joined game successfully!');
+      toast.success('🎮 Joined game and contract signed! Game starting...');
     } catch (error: any) {
       console.error('Error joining game:', error);
       toast.error(error.message || 'Failed to join game');
@@ -147,7 +181,9 @@ export default function Index() {
       entranceFee: 0,
       status: 'active',
       winner: null,
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      creatorSigned: true,
+      opponentSigned: true
     });
     toast.success(`Starting ${difficulty} bot game!`);
   };
@@ -182,18 +218,41 @@ export default function Index() {
       if (rankUp) {
         toast.success(`🎉 Rank Up! You are now ${player.currentRank}!`);
       }
+    } else if (currentGame?.opponent !== 'bot' && currentGame) {
+      // Complete multiplayer game
+      if (result && walletState.publicKey) {
+        const winner = result.winner === result.playerColor ? walletState.publicKey : 
+                      (currentGame.creator === walletState.publicKey ? currentGame.opponent! : currentGame.creator);
+        
+        if (result.winner !== 'draw') {
+          solanaManager.completeGame(currentGame.id, winner);
+          toast.success('🎉 Game completed! Winnings processed.');
+        }
+      }
     }
     
     setCurrentGame(null);
     setGameMode('multiplayer');
+  };
+
+  const handleRefreshGames = async () => {
+    if (!walletState.connected) return;
     
-    // Refresh available games only if wallet is connected
-    if (walletState.connected) {
-      solanaManager.getAvailableGames().then(games => {
-        setAvailableGames(games || []);
-      }).catch(error => {
-        console.error('Error refreshing games:', error);
-      });
+    setIsLoading(true);
+    try {
+      let games;
+      if (isMobile) {
+        games = await solanaManager.refreshGamesForMobile();
+      } else {
+        games = await solanaManager.getAvailableGames();
+      }
+      setAvailableGames(games || []);
+      toast.success('Games refreshed!');
+    } catch (error) {
+      console.error('Error refreshing games:', error);
+      toast.error('Failed to refresh games');
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -241,9 +300,14 @@ export default function Index() {
             <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
               Solana Chess
             </h1>
+            {isMobile && (
+              <div className="p-2 bg-green-100 rounded-full">
+                <Smartphone className="h-6 w-6 text-green-600" />
+              </div>
+            )}
           </div>
           <p className="text-lg text-gray-600 max-w-2xl mx-auto">
-            Play chess with real SOL stakes or practice against AI bots! Climb the ranks and win annual tournaments!
+            Play chess with real SOL stakes or practice against AI bots! {isMobile ? 'Mobile optimized!' : 'Climb the ranks and win annual tournaments!'}
           </p>
         </div>
 
@@ -445,7 +509,7 @@ export default function Index() {
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2">
                     <Plus className="h-5 w-5" />
-                    Create New Game (SOL Stakes)
+                    Create New Game (Real SOL Stakes)
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
@@ -482,12 +546,18 @@ export default function Index() {
                     </div>
                   </div>
 
+                  <div className="bg-blue-50 p-3 rounded-lg">
+                    <div className="text-sm text-blue-800">
+                      🔐 <strong>Secure Escrow:</strong> Your SOL is held in escrow until game completion
+                    </div>
+                  </div>
+
                   <Button
                     onClick={handleCreateGame}
                     disabled={isLoading || !entranceFee || parseFloat(entranceFee) <= 0}
                     className="w-full bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700"
                   >
-                    {isLoading ? 'Creating...' : 'Create Game'}
+                    {isLoading ? 'Creating & Signing...' : 'Create & Sign Game'}
                   </Button>
                 </CardContent>
               </Card>
@@ -495,10 +565,21 @@ export default function Index() {
               {/* Available Games */}
               <Card>
                 <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <Users className="h-5 w-5" />
-                    Available Games ({availableGames.length})
-                  </CardTitle>
+                  <div className="flex items-center justify-between">
+                    <CardTitle className="flex items-center gap-2">
+                      <Users className="h-5 w-5" />
+                      Available Games ({availableGames.length})
+                      {isMobile && <Badge variant="secondary">Mobile</Badge>}
+                    </CardTitle>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={handleRefreshGames}
+                      disabled={isLoading}
+                    >
+                      <RefreshCw className={`h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />
+                    </Button>
+                  </div>
                 </CardHeader>
                 <CardContent>
                   <div className="space-y-3 max-h-96 overflow-y-auto">
@@ -515,6 +596,11 @@ export default function Index() {
                             <div className="flex items-center gap-2">
                               <Trophy className="h-4 w-4 text-yellow-600" />
                               <span className="font-medium">{game.entranceFee} SOL</span>
+                              {(game as any).creatorSigned && (
+                                <Badge variant="secondary" className="text-xs bg-green-100 text-green-800">
+                                  ✓ Signed
+                                </Badge>
+                              )}
                             </div>
                             <Badge variant="secondary">
                               Prize: {(game.entranceFee * 1.8).toFixed(4)} SOL
@@ -530,7 +616,7 @@ export default function Index() {
                               onClick={() => handleJoinGame(game.id)}
                               disabled={isLoading || game.creator === walletState.publicKey}
                             >
-                              {game.creator === walletState.publicKey ? 'Your Game' : 'Join'}
+                              {game.creator === walletState.publicKey ? 'Your Game' : 'Join & Sign'}
                             </Button>
                           </div>
                         </div>
@@ -545,7 +631,8 @@ export default function Index() {
 
         {/* Footer */}
         <div className="text-center mt-12 text-sm text-gray-500">
-          <p>Powered by Solana • {walletState.connected ? 'Climb the ranks and win annual tournaments!' : 'Real SOL transactions on mainnet'}</p>
+          <p>Powered by Solana • {walletState.connected ? 'Secure escrow contracts with real SOL stakes' : 'Real SOL transactions on mainnet'}</p>
+          {isMobile && <p className="mt-1">📱 Mobile optimized for iOS and Android</p>}
         </div>
       </div>
     </div>
