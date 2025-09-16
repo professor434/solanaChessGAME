@@ -5,7 +5,7 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
-import { Wallet, Plus, Users, Crown, TrendingUp, Trophy, Gamepad2, Bot, Zap, Target, Brain, Medal, Star, Smartphone, RefreshCw, DollarSign } from 'lucide-react';
+import { Wallet, Plus, Users, Crown, TrendingUp, Trophy, Gamepad2, Bot, Zap, Target, Brain, Medal, Star, Smartphone, RefreshCw, DollarSign, Clock, X } from 'lucide-react';
 import { toast } from 'sonner';
 import WalletConnect from '@/components/WalletConnect';
 import ChessGame from '@/components/ChessGame';
@@ -44,6 +44,24 @@ export default function Index() {
     window.addEventListener('resize', checkMobile);
     return () => window.removeEventListener('resize', checkMobile);
   }, []);
+
+  // Check for existing player game on wallet connection
+  useEffect(() => {
+    if (walletState.connected && walletState.publicKey) {
+      const existingGame = solanaManager.getPlayerCurrentGame(walletState.publicKey);
+      if (existingGame) {
+        console.log('🔄 Found existing game for player:', existingGame.id);
+        setCurrentGame(existingGame);
+        setGameMode('multiplayer');
+        
+        if (existingGame.status === 'waiting') {
+          toast.info('Returning to your waiting game...', { duration: 3000 });
+        } else if (existingGame.status === 'active') {
+          toast.info('Returning to your active game...', { duration: 3000 });
+        }
+      }
+    }
+  }, [walletState.connected, walletState.publicKey]);
 
   // Load available games with mobile compatibility
   useEffect(() => {
@@ -119,7 +137,7 @@ export default function Index() {
       
       setCurrentGame(gameRoom);
       setGameMode('multiplayer');
-      toast.success(`🎮 Game created! You paid ${fee} SOL. Waiting for opponent to pay same amount and join!`);
+      toast.success(`🎮 Game created! You paid ${fee} SOL. Game is now visible to other players. Waiting for opponent...`);
     } catch (error: any) {
       console.error('Error creating game:', error);
       toast.error(error.message || 'Failed to create game');
@@ -162,6 +180,31 @@ export default function Index() {
     }
   };
 
+  const handleCancelGame = async (gameId: string) => {
+    if (!walletState.connected || !walletState.publicKey) {
+      toast.error('Please connect your wallet first');
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      await solanaManager.cancelGame(gameId, walletState.publicKey);
+      setCurrentGame(null);
+      toast.success('Game cancelled successfully');
+    } catch (error: any) {
+      console.error('Error cancelling game:', error);
+      toast.error(error.message || 'Failed to cancel game');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleReturnToLobby = () => {
+    setCurrentGame(null);
+    setGameMode('multiplayer');
+    toast.info('Returned to lobby. Your game is still available for opponents to join.');
+  };
+
   const handleStartBotGame = (difficulty: 'easy' | 'medium' | 'hard') => {
     if (!walletState.connected || !walletState.publicKey) {
       toast.error('Please connect your wallet first');
@@ -181,6 +224,7 @@ export default function Index() {
       status: 'active',
       winner: null,
       createdAt: Date.now(),
+      lastActivity: Date.now(),
       creatorPaid: true,
       opponentPaid: true
     });
@@ -260,7 +304,11 @@ export default function Index() {
     return solanaManager.getPlayerStats(walletState.publicKey);
   };
 
-  if (currentGame) {
+  const isPlayerInWaitingGame = () => {
+    return currentGame && currentGame.status === 'waiting' && currentGame.creator === walletState.publicKey;
+  };
+
+  if (currentGame && !isPlayerInWaitingGame()) {
     return (
       <ChessGame
         gameMode={gameMode}
@@ -314,6 +362,57 @@ export default function Index() {
 
         {walletState.connected && (
           <>
+            {/* Waiting Game Alert */}
+            {isPlayerInWaitingGame() && (
+              <div className="max-w-4xl mx-auto mb-8">
+                <Card className="border-orange-200 bg-orange-50">
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2 text-orange-800">
+                      <Clock className="h-5 w-5" />
+                      Your Game is Waiting for Opponent
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="space-y-4">
+                      <div className="flex items-center justify-between p-3 bg-white rounded-lg border">
+                        <div>
+                          <div className="font-medium">Game ID: {currentGame?.id.split('_')[1]}</div>
+                          <div className="text-sm text-gray-600">
+                            Entrance Fee: {currentGame?.entranceFee} SOL • Prize Pool: {currentGame?.winnerPrize} SOL (90%)
+                          </div>
+                        </div>
+                        <Badge variant="secondary" className="bg-orange-100 text-orange-800">
+                          Waiting
+                        </Badge>
+                      </div>
+                      
+                      <div className="flex gap-2">
+                        <Button
+                          onClick={handleReturnToLobby}
+                          variant="outline"
+                          className="flex-1"
+                        >
+                          Return to Lobby (Game Stays Active)
+                        </Button>
+                        <Button
+                          onClick={() => currentGame && handleCancelGame(currentGame.id)}
+                          variant="destructive"
+                          disabled={isLoading}
+                        >
+                          <X className="h-4 w-4 mr-1" />
+                          Cancel Game
+                        </Button>
+                      </div>
+                      
+                      <div className="text-xs text-center text-gray-500">
+                        💡 Your game is visible to other players. You can return to lobby and your game will remain available for opponents to join.
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+            )}
+
             {/* Player Rank & Stats */}
             <div className="max-w-4xl mx-auto mb-8">
               <Card>
@@ -550,10 +649,12 @@ export default function Index() {
 
                   <Button
                     onClick={handleCreateGame}
-                    disabled={isLoading || !entranceFee || parseFloat(entranceFee) <= 0}
+                    disabled={isLoading || !entranceFee || parseFloat(entranceFee) <= 0 || isPlayerInWaitingGame()}
                     className="w-full bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700"
                   >
-                    {isLoading ? 'Creating & Paying...' : 'Create Game & Pay Fee'}
+                    {isLoading ? 'Creating & Paying...' : 
+                     isPlayerInWaitingGame() ? 'You have a waiting game' :
+                     'Create Game & Pay Fee'}
                   </Button>
                 </CardContent>
               </Card>
@@ -595,6 +696,11 @@ export default function Index() {
                               <Badge variant="secondary" className="text-xs bg-blue-100 text-blue-800">
                                 Win {game.winnerPrize} SOL
                               </Badge>
+                              {game.creator === walletState.publicKey && (
+                                <Badge variant="secondary" className="text-xs bg-orange-100 text-orange-800">
+                                  Your Game
+                                </Badge>
+                              )}
                             </div>
                             <Badge variant="secondary" className="text-orange-600">
                               Both Pay Same
@@ -605,14 +711,29 @@ export default function Index() {
                             <div className="text-sm text-gray-600">
                               Created by: {formatAddress(game.creator)}
                             </div>
-                            <Button
-                              size="sm"
-                              onClick={() => handleJoinGame(game.id)}
-                              disabled={isLoading || game.creator === walletState.publicKey}
-                              className="bg-blue-600 hover:bg-blue-700"
-                            >
-                              {game.creator === walletState.publicKey ? 'Your Game' : `Pay ${game.entranceFee} SOL & Join`}
-                            </Button>
+                            <div className="flex gap-2">
+                              {game.creator === walletState.publicKey ? (
+                                <Button
+                                  size="sm"
+                                  onClick={() => {
+                                    setCurrentGame(game);
+                                    setGameMode('multiplayer');
+                                  }}
+                                  className="bg-orange-600 hover:bg-orange-700"
+                                >
+                                  Return to Game
+                                </Button>
+                              ) : (
+                                <Button
+                                  size="sm"
+                                  onClick={() => handleJoinGame(game.id)}
+                                  disabled={isLoading}
+                                  className="bg-blue-600 hover:bg-blue-700"
+                                >
+                                  Pay {game.entranceFee} SOL & Join
+                                </Button>
+                              )}
+                            </div>
                           </div>
                         </div>
                       ))
