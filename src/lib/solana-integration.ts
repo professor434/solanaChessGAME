@@ -23,6 +23,7 @@ export interface GameRoom {
   opponentPaid: boolean;
   creatorTxSignature?: string;
   opponentTxSignature?: string;
+  lastActivity: number;
 }
 
 export interface PlayerStats {
@@ -37,6 +38,7 @@ export class SolanaGameManager {
   private connection: Connection;
   private readonly GAMES_STORAGE_KEY = 'solana_chess_games_global';
   private readonly STATS_STORAGE_KEY = 'solana_chess_stats_global';
+  private readonly PLAYER_GAME_KEY = 'solana_chess_player_current_game';
   private readonly TREASURY_WALLET = '42SoggCv1oXBhNWicmAJir3arYiS2NCMveWpUkixYXzj';
   private readonly QUICKNODE_RPC = 'https://broken-purple-breeze.solana-mainnet.quiknode.pro/b087363c02a61ba4c37f9acd5c3c4dcc7b20420f/';
   private readonly PLATFORM_FEE_PERCENT = 0.10; // 10% platform fee
@@ -97,6 +99,60 @@ export class SolanaGameManager {
       }
     } catch (error) {
       console.error('Error saving games:', error);
+    }
+  }
+
+  // Store current player's game for persistence
+  private setPlayerCurrentGame(playerPublicKey: string, gameId: string | null): void {
+    try {
+      const playerGames = safeLocalStorage.getItem(this.PLAYER_GAME_KEY);
+      const currentGames = playerGames ? safeJSONParse(playerGames, {}) : {};
+      
+      if (gameId) {
+        currentGames[playerPublicKey] = {
+          gameId,
+          timestamp: Date.now()
+        };
+      } else {
+        delete currentGames[playerPublicKey];
+      }
+      
+      const updatedData = safeJSONStringify(currentGames);
+      if (updatedData) {
+        safeLocalStorage.setItem(this.PLAYER_GAME_KEY, updatedData);
+      }
+    } catch (error) {
+      console.error('Error setting player current game:', error);
+    }
+  }
+
+  // Get current player's game
+  getPlayerCurrentGame(playerPublicKey: string): GameRoom | null {
+    try {
+      const playerGames = safeLocalStorage.getItem(this.PLAYER_GAME_KEY);
+      const currentGames = playerGames ? safeJSONParse(playerGames, {}) : {};
+      
+      const playerGame = currentGames[playerPublicKey];
+      if (!playerGame) return null;
+      
+      // Check if game is still valid (not older than 2 hours)
+      if (Date.now() - playerGame.timestamp > 2 * 60 * 60 * 1000) {
+        this.setPlayerCurrentGame(playerPublicKey, null);
+        return null;
+      }
+      
+      const allGames = this.getAllGames();
+      const game = allGames.find(g => g.id === playerGame.gameId);
+      
+      if (!game || game.status === 'completed') {
+        this.setPlayerCurrentGame(playerPublicKey, null);
+        return null;
+      }
+      
+      return game;
+    } catch (error) {
+      console.error('Error getting player current game:', error);
+      return null;
     }
   }
 
@@ -205,6 +261,7 @@ export class SolanaGameManager {
         status: 'waiting',
         winner: null,
         createdAt: Date.now(),
+        lastActivity: Date.now(),
         creatorPaid: true,
         opponentPaid: false,
         creatorTxSignature
@@ -213,6 +270,9 @@ export class SolanaGameManager {
       const allGames = this.getAllGames();
       allGames.push(gameRoom);
       this.saveGames(allGames);
+
+      // Set this as the player's current game
+      this.setPlayerCurrentGame(creatorPublicKey, gameRoom.id);
 
       console.log(`✅ Game created with creator payment:`);
       console.log(`   - Game ID: ${gameRoom.id}`);
@@ -234,7 +294,7 @@ export class SolanaGameManager {
   }
 
   async joinGame(gameId: string, playerPublicKey: string): Promise<GameRoom> {
-    console.log(`🎮 Player joining game ${gameId} - Must pay ${gameId} entrance fee`);
+    console.log(`🎮 Player joining game ${gameId} - Must pay entrance fee`);
     
     try {
       const allGames = this.getAllGames();
@@ -273,9 +333,14 @@ export class SolanaGameManager {
       game.status = 'active';
       game.opponentPaid = true;
       game.opponentTxSignature = opponentTxSignature;
+      game.lastActivity = Date.now();
       
       allGames[gameIndex] = game;
       this.saveGames(allGames);
+
+      // Set this as both players' current game
+      this.setPlayerCurrentGame(game.creator, game.id);
+      this.setPlayerCurrentGame(playerPublicKey, game.id);
 
       console.log(`✅ Player joined game with payment:`);
       console.log(`   - Game ID: ${gameId}`);
@@ -290,6 +355,40 @@ export class SolanaGameManager {
     } catch (error: any) {
       console.error('❌ Error joining game:', error);
       throw new Error(error.message || 'Failed to join game');
+    }
+  }
+
+  // Cancel a waiting game (only creator can cancel)
+  async cancelGame(gameId: string, playerPublicKey: string): Promise<void> {
+    try {
+      const allGames = this.getAllGames();
+      const gameIndex = allGames.findIndex(game => game.id === gameId);
+      
+      if (gameIndex === -1) {
+        throw new Error('Game not found');
+      }
+
+      const game = allGames[gameIndex];
+      
+      if (game.creator !== playerPublicKey) {
+        throw new Error('Only game creator can cancel the game');
+      }
+
+      if (game.status !== 'waiting') {
+        throw new Error('Can only cancel waiting games');
+      }
+
+      // Remove the game
+      allGames.splice(gameIndex, 1);
+      this.saveGames(allGames);
+
+      // Clear player's current game
+      this.setPlayerCurrentGame(playerPublicKey, null);
+
+      console.log(`🗑️ Game ${gameId} cancelled by creator`);
+    } catch (error: any) {
+      console.error('❌ Error cancelling game:', error);
+      throw new Error(error.message || 'Failed to cancel game');
     }
   }
 
@@ -364,9 +463,16 @@ export class SolanaGameManager {
       
       game.status = 'completed';
       game.winner = winner;
+      game.lastActivity = Date.now();
       
       allGames[gameIndex] = game;
       this.saveGames(allGames);
+
+      // Clear both players' current game
+      this.setPlayerCurrentGame(game.creator, null);
+      if (game.opponent && game.opponent !== 'bot') {
+        this.setPlayerCurrentGame(game.opponent, null);
+      }
 
       console.log(`🏆 Game completed:`);
       console.log(`   - Winner: ${winner}`);
