@@ -30,86 +30,75 @@ export class EnhancedWalletManager {
   async getAvailableWallets(): Promise<WalletAdapter[]> {
     const wallets: WalletAdapter[] = [];
 
-    // Check for Phantom
-    if ((window as any).phantom?.solana?.isPhantom) {
-      wallets.push({
+    // Define all supported wallets with their detection logic
+    const walletConfigs = [
+      {
         name: 'Phantom',
         icon: 'https://phantom.app/img/phantom-icon.svg',
         url: 'https://phantom.app/',
-        readyState: 'Installed'
-      });
-    }
-
-    // Check for Solflare
-    if ((window as any).solflare?.isSolflare) {
-      wallets.push({
+        detect: () => (window as any).phantom?.solana?.isPhantom
+      },
+      {
         name: 'Solflare',
         icon: 'https://solflare.com/assets/solflare-logo.svg',
         url: 'https://solflare.com/',
-        readyState: 'Installed'
-      });
-    }
-
-    // Check for Backpack
-    if ((window as any).backpack?.isBackpack) {
-      wallets.push({
+        detect: () => (window as any).solflare?.isSolflare
+      },
+      {
         name: 'Backpack',
         icon: 'https://backpack.app/backpack.png',
         url: 'https://backpack.app/',
-        readyState: 'Installed'
-      });
-    }
-
-    // Check for Glow
-    if ((window as any).glow) {
-      wallets.push({
+        detect: () => (window as any).backpack?.isBackpack
+      },
+      {
         name: 'Glow',
         icon: 'https://glow.app/favicon.ico',
         url: 'https://glow.app/',
-        readyState: 'Installed'
-      });
-    }
-
-    // Check for Coinbase Wallet
-    if ((window as any).coinbaseSolana) {
-      wallets.push({
+        detect: () => (window as any).glow
+      },
+      {
         name: 'Coinbase Wallet',
         icon: 'https://wallet.coinbase.com/favicon.ico',
         url: 'https://wallet.coinbase.com/',
-        readyState: 'Installed'
-      });
-    }
-
-    // Check for Trust Wallet
-    if ((window as any).trustwallet?.solana) {
-      wallets.push({
+        detect: () => (window as any).coinbaseSolana
+      },
+      {
         name: 'Trust Wallet',
         icon: 'https://trustwallet.com/favicon.ico',
         url: 'https://trustwallet.com/',
-        readyState: 'Installed'
+        detect: () => (window as any).trustwallet?.solana
+      },
+      {
+        name: 'Slope',
+        icon: 'https://slope.finance/favicon.ico',
+        url: 'https://slope.finance/',
+        detect: () => (window as any).Slope
+      },
+      {
+        name: 'Torus',
+        icon: 'https://tor.us/favicon.ico',
+        url: 'https://tor.us/',
+        detect: () => (window as any).torus
+      }
+    ];
+
+    // Check each wallet
+    for (const config of walletConfigs) {
+      const isInstalled = config.detect();
+      wallets.push({
+        name: config.name,
+        icon: config.icon,
+        url: config.url,
+        readyState: isInstalled ? 'Installed' : 'NotDetected'
       });
     }
 
-    // Add popular wallets that aren't installed
-    const popularWallets = [
-      { name: 'Phantom', url: 'https://phantom.app/' },
-      { name: 'Solflare', url: 'https://solflare.com/' },
-      { name: 'Backpack', url: 'https://backpack.app/' },
-      { name: 'Glow', url: 'https://glow.app/' }
-    ];
-
-    for (const wallet of popularWallets) {
-      if (!wallets.find(w => w.name === wallet.name)) {
-        wallets.push({
-          name: wallet.name,
-          icon: '',
-          url: wallet.url,
-          readyState: 'NotDetected'
-        });
-      }
-    }
-
-    return wallets;
+    // Sort installed wallets first
+    return wallets.sort((a, b) => {
+      if (a.readyState === 'Installed' && b.readyState !== 'Installed') return -1;
+      if (b.readyState === 'Installed' && a.readyState !== 'Installed') return 1;
+      return a.name.localeCompare(b.name);
+    });
   }
 
   private getWalletProvider(walletName: string): WalletProvider | null {
@@ -119,7 +108,9 @@ export class EnhancedWalletManager {
       'Backpack': () => (window as any).backpack,
       'Glow': () => (window as any).glow,
       'Coinbase Wallet': () => (window as any).coinbaseSolana,
-      'Trust Wallet': () => (window as any).trustwallet?.solana
+      'Trust Wallet': () => (window as any).trustwallet?.solana,
+      'Slope': () => (window as any).Slope,
+      'Torus': () => (window as any).torus
     };
 
     const getProvider = providers[walletName];
