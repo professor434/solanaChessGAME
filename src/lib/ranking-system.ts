@@ -1,12 +1,13 @@
-// Comprehensive ranking and tournament system
 import { safeLocalStorage, safeJSONParse, safeJSONStringify } from './storage-utils';
+
+export type Rank = 'Pawn' | 'Knight' | 'Bishop' | 'Rook' | 'Queen' | 'King' | 'Grandmaster' | 'Legend';
 
 export interface PlayerRank {
   publicKey: string;
   username?: string;
-  currentRank: string;
+  currentRank: Rank;
   elo: number;
-  totalGames: number;
+  gamesPlayed: number;
   wins: number;
   losses: number;
   draws: number;
@@ -14,20 +15,10 @@ export interface PlayerRank {
   bestWinStreak: number;
   totalEarnings: number;
   totalSpent: number;
-  rankProgress: number; // 0-100 progress to next rank
+  rankProgress: number;
   achievements: string[];
-  joinDate: number;
+  joinedAt: number;
   lastActive: number;
-}
-
-export interface TournamentEntry {
-  publicKey: string;
-  username?: string;
-  finalElo: number;
-  totalWins: number;
-  totalEarnings: number;
-  rank: number;
-  mysteryPrizeWon?: string;
 }
 
 export interface AnnualTournament {
@@ -41,6 +32,34 @@ export interface AnnualTournament {
     third: string;
   };
   isActive: boolean;
+}
+
+export interface TournamentEntry {
+  publicKey: string;
+  username?: string;
+  finalElo: number;
+  totalWins: number;
+  totalEarnings: number;
+  rank: number;
+  mysteryPrizeWon?: string;
+}
+
+export interface Tournament {
+  id: string;
+  name: string;
+  startDate: number;
+  endDate: number;
+  prizePool: number;
+  participants: string[];
+  status: 'upcoming' | 'active' | 'completed';
+}
+
+export interface Achievement {
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+  condition: (player: PlayerRank) => boolean;
 }
 
 export const RANKS = [
@@ -80,338 +99,499 @@ export const MYSTERY_PRIZES = [
   'Early Access to New Features'
 ];
 
-export class RankingSystem {
-  private static instance: RankingSystem;
-  private readonly STORAGE_KEY = 'solana_chess_rankings';
-  private readonly TOURNAMENT_KEY = 'solana_chess_tournaments';
+class RankingSystem {
+  private readonly RANKINGS_STORAGE_KEY = 'solana_chess_rankings_global';
+  private readonly TOURNAMENTS_STORAGE_KEY = 'solana_chess_tournaments_global';
+  private readonly LEADERBOARD_STORAGE_KEY = 'solana_chess_leaderboard_global';
 
-  static getInstance(): RankingSystem {
-    if (!RankingSystem.instance) {
-      RankingSystem.instance = new RankingSystem();
+  private achievements: Achievement[] = [
+    {
+      id: 'first_win',
+      name: 'First Victory',
+      description: 'Win your first game',
+      icon: '🎉',
+      condition: (player) => player.wins >= 1
+    },
+    {
+      id: 'win_streak_3',
+      name: 'Triple Threat',
+      description: 'Win 3 games in a row',
+      icon: '🔥',
+      condition: (player) => player.winStreak >= 3
+    },
+    {
+      id: 'win_streak_5',
+      name: 'Unstoppable',
+      description: 'Win 5 games in a row',
+      icon: '⚡',
+      condition: (player) => player.winStreak >= 5
+    },
+    {
+      id: 'win_streak_10',
+      name: 'Legendary',
+      description: 'Win 10 games in a row',
+      icon: '👑',
+      condition: (player) => player.winStreak >= 10
+    },
+    {
+      id: 'games_10',
+      name: 'Veteran',
+      description: 'Play 10 games',
+      icon: '🛡️',
+      condition: (player) => player.gamesPlayed >= 10
+    },
+    {
+      id: 'games_50',
+      name: 'Master',
+      description: 'Play 50 games',
+      icon: '🏆',
+      condition: (player) => player.gamesPlayed >= 50
+    },
+    {
+      id: 'games_100',
+      name: 'Grandmaster',
+      description: 'Play 100 games',
+      icon: '💎',
+      condition: (player) => player.gamesPlayed >= 100
+    },
+    {
+      id: 'earnings_1',
+      name: 'First Earnings',
+      description: 'Earn your first SOL',
+      icon: '💰',
+      condition: (player) => player.totalEarnings > 0
+    },
+    {
+      id: 'high_elo',
+      name: 'Elite Player',
+      description: 'Reach 1600+ ELO',
+      icon: '⭐',
+      condition: (player) => player.elo >= 1600
     }
-    return RankingSystem.instance;
+  ];
+
+  private rankThresholds = {
+    'Pawn': 0,
+    'Knight': 1200,
+    'Bishop': 1400,
+    'Rook': 1600,
+    'Queen': 1800,
+    'King': 2000,
+    'Grandmaster': 2200,
+    'Legend': 2500
+  };
+
+  private rankColors = {
+    'Pawn': '#8B4513',
+    'Knight': '#CD853F',
+    'Bishop': '#4682B4',
+    'Rook': '#9932CC',
+    'Queen': '#FF1493',
+    'King': '#FFD700',
+    'Grandmaster': '#FF4500',
+    'Legend': '#FF1493'
+  };
+
+  // Get all players from global storage
+  private getAllPlayers(): PlayerRank[] {
+    try {
+      const rankingsData = safeLocalStorage.getItem(this.RANKINGS_STORAGE_KEY);
+      const rankings = rankingsData ? safeJSONParse(rankingsData, {}) : {};
+      
+      // Convert object to array and sort by ELO
+      const players = Object.values(rankings) as PlayerRank[];
+      return players.sort((a, b) => b.elo - a.elo);
+    } catch (error) {
+      console.error('Error loading all players:', error);
+      return [];
+    }
   }
 
-  private getCurrentYear(): number {
-    return new Date().getFullYear();
-  }
-
-  private calculateEloChange(playerElo: number, opponentElo: number, result: 'win' | 'loss' | 'draw'): number {
-    const K = 32; // K-factor
-    const expectedScore = 1 / (1 + Math.pow(10, (opponentElo - playerElo) / 400));
-    
-    let actualScore = 0;
-    if (result === 'win') actualScore = 1;
-    else if (result === 'draw') actualScore = 0.5;
-    else actualScore = 0;
-
-    return Math.round(K * (actualScore - expectedScore));
-  }
-
-  private getRankFromElo(elo: number, gamesPlayed: number): string {
-    for (let i = RANKS.length - 1; i >= 0; i--) {
-      const rank = RANKS[i];
-      if (elo >= rank.minElo && gamesPlayed >= rank.gamesRequired) {
-        return rank.name;
+  // Save all players to global storage
+  private saveAllPlayers(players: PlayerRank[]): void {
+    try {
+      const rankings: Record<string, PlayerRank> = {};
+      players.forEach(player => {
+        rankings[player.publicKey] = player;
+      });
+      
+      const rankingsData = safeJSONStringify(rankings);
+      if (rankingsData) {
+        safeLocalStorage.setItem(this.RANKINGS_STORAGE_KEY, rankingsData);
+        
+        // Also update leaderboard cache
+        this.updateLeaderboardCache(players);
+        console.log(`💾 Saved ${players.length} players to global rankings`);
       }
+    } catch (error) {
+      console.error('Error saving all players:', error);
     }
-    return RANKS[0].name; // Default to Pawn
   }
 
-  private calculateRankProgress(elo: number, gamesPlayed: number): number {
-    const currentRank = this.getRankFromElo(elo, gamesPlayed);
-    const rankIndex = RANKS.findIndex(r => r.name === currentRank);
-    
-    if (rankIndex === RANKS.length - 1) return 100; // Max rank
-    
-    const nextRank = RANKS[rankIndex + 1];
-    const currentRankData = RANKS[rankIndex];
-    
-    // Check if games requirement is met for next rank
-    if (gamesPlayed < nextRank.gamesRequired) {
-      const gamesProgress = (gamesPlayed / nextRank.gamesRequired) * 50;
-      return Math.min(gamesProgress, 50);
-    }
-    
-    // Calculate ELO progress
-    const eloProgress = ((elo - currentRankData.minElo) / (nextRank.minElo - currentRankData.minElo)) * 50 + 50;
-    return Math.min(eloProgress, 100);
-  }
+  // Update leaderboard cache for faster access
+  private updateLeaderboardCache(players: PlayerRank[]): void {
+    try {
+      const leaderboard = players
+        .filter(p => p.gamesPlayed > 0)
+        .sort((a, b) => b.elo - a.elo)
+        .slice(0, 100) // Top 100 players
+        .map((player, index) => ({
+          rank: index + 1,
+          publicKey: player.publicKey,
+          currentRank: player.currentRank,
+          elo: player.elo,
+          wins: player.wins,
+          losses: player.losses,
+          winStreak: player.winStreak,
+          gamesPlayed: player.gamesPlayed,
+          totalEarnings: player.totalEarnings,
+          lastActive: player.lastActive
+        }));
 
-  private checkAchievements(player: PlayerRank): string[] {
-    const newAchievements: string[] = [];
-    
-    // First win
-    if (player.wins >= 1 && !player.achievements.includes('first_win')) {
-      newAchievements.push('first_win');
+      const leaderboardData = safeJSONStringify(leaderboard);
+      if (leaderboardData) {
+        safeLocalStorage.setItem(this.LEADERBOARD_STORAGE_KEY, leaderboardData);
+        console.log(`📊 Updated leaderboard cache with ${leaderboard.length} players`);
+      }
+    } catch (error) {
+      console.error('Error updating leaderboard cache:', error);
     }
-    
-    // Win streaks
-    if (player.bestWinStreak >= 5 && !player.achievements.includes('win_streak_5')) {
-      newAchievements.push('win_streak_5');
-    }
-    if (player.bestWinStreak >= 10 && !player.achievements.includes('win_streak_10')) {
-      newAchievements.push('win_streak_10');
-    }
-    
-    // Games played
-    if (player.totalGames >= 100 && !player.achievements.includes('games_100')) {
-      newAchievements.push('games_100');
-    }
-    if (player.totalGames >= 500 && !player.achievements.includes('games_500')) {
-      newAchievements.push('games_500');
-    }
-    
-    // Earnings
-    if (player.totalEarnings >= 1 && !player.achievements.includes('earnings_1')) {
-      newAchievements.push('earnings_1');
-    }
-    if (player.totalEarnings >= 10 && !player.achievements.includes('earnings_10')) {
-      newAchievements.push('earnings_10');
-    }
-    
-    return newAchievements;
   }
 
   getPlayerRank(publicKey: string): PlayerRank {
-    const rankings = this.getAllRankings();
-    
-    if (rankings[publicKey]) {
-      return rankings[publicKey];
+    try {
+      const allPlayers = this.getAllPlayers();
+      let player = allPlayers.find(p => p.publicKey === publicKey);
+      
+      if (!player) {
+        // Create new player
+        player = {
+          publicKey,
+          currentRank: 'Pawn',
+          elo: 1000,
+          gamesPlayed: 0,
+          wins: 0,
+          losses: 0,
+          draws: 0,
+          winStreak: 0,
+          bestWinStreak: 0,
+          totalEarnings: 0,
+          totalSpent: 0,
+          rankProgress: 0,
+          achievements: [],
+          joinedAt: Date.now(),
+          lastActive: Date.now()
+        };
+        
+        allPlayers.push(player);
+        this.saveAllPlayers(allPlayers);
+        console.log(`👤 Created new player: ${publicKey}`);
+      } else {
+        // Update last active
+        player.lastActive = Date.now();
+        this.saveAllPlayers(allPlayers);
+      }
+      
+      return player;
+    } catch (error) {
+      console.error('Error getting player rank:', error);
+      return {
+        publicKey,
+        currentRank: 'Pawn',
+        elo: 1000,
+        gamesPlayed: 0,
+        wins: 0,
+        losses: 0,
+        draws: 0,
+        winStreak: 0,
+        bestWinStreak: 0,
+        totalEarnings: 0,
+        totalSpent: 0,
+        rankProgress: 0,
+        achievements: [],
+        joinedAt: Date.now(),
+        lastActive: Date.now()
+      };
     }
-    
-    // Create new player
-    const newPlayer: PlayerRank = {
-      publicKey,
-      currentRank: 'Pawn',
-      elo: 1000,
-      totalGames: 0,
-      wins: 0,
-      losses: 0,
-      draws: 0,
-      winStreak: 0,
-      bestWinStreak: 0,
-      totalEarnings: 0,
-      totalSpent: 0,
-      rankProgress: 0,
-      achievements: [],
-      joinDate: Date.now(),
-      lastActive: Date.now()
-    };
-    
-    this.savePlayerRank(newPlayer);
-    return newPlayer;
   }
 
   updatePlayerAfterGame(
     publicKey: string, 
-    result: 'win' | 'loss' | 'draw',
-    opponentElo: number = 1000,
+    result: 'win' | 'loss' | 'draw', 
+    eloChange: number,
     earnings: number = 0,
     spent: number = 0
   ): { player: PlayerRank; newAchievements: string[]; rankUp: boolean } {
-    const player = this.getPlayerRank(publicKey);
-    const oldRank = player.currentRank;
+    try {
+      const allPlayers = this.getAllPlayers();
+      let player = allPlayers.find(p => p.publicKey === publicKey);
+      
+      if (!player) {
+        player = this.getPlayerRank(publicKey);
+        allPlayers.push(player);
+      }
+
+      const oldRank = player.currentRank;
+      const newAchievements: string[] = [];
+
+      // Update stats
+      player.gamesPlayed++;
+      player.lastActive = Date.now();
+      
+      if (result === 'win') {
+        player.wins++;
+        player.winStreak++;
+        player.elo += Math.abs(eloChange);
+        player.totalEarnings += earnings;
+        
+        if (player.winStreak > player.bestWinStreak) {
+          player.bestWinStreak = player.winStreak;
+        }
+      } else if (result === 'loss') {
+        player.losses++;
+        player.winStreak = 0;
+        player.elo = Math.max(800, player.elo - Math.abs(eloChange)); // Minimum ELO of 800
+      } else {
+        // Draw - small ELO adjustment
+        player.draws++;
+        player.winStreak = 0;
+        player.elo += eloChange > 0 ? 5 : -5;
+      }
+
+      // Update rank based on ELO
+      const newRank = this.calculateRank(player.elo);
+      const rankUp = newRank !== oldRank && this.getRankLevel(newRank) > this.getRankLevel(oldRank);
+      player.currentRank = newRank;
+
+      // Check for new achievements
+      this.achievements.forEach(achievement => {
+        if (!player!.achievements.includes(achievement.id) && achievement.condition(player!)) {
+          player!.achievements.push(achievement.id);
+          newAchievements.push(achievement.id);
+        }
+      });
+
+      // Save updated players
+      this.saveAllPlayers(allPlayers);
+
+      console.log(`🎮 Updated player ${publicKey}: ${result} | ELO: ${player.elo} | Rank: ${player.currentRank}`);
+      
+      return { player, newAchievements, rankUp };
+    } catch (error) {
+      console.error('Error updating player after game:', error);
+      return { 
+        player: this.getPlayerRank(publicKey), 
+        newAchievements: [], 
+        rankUp: false 
+      };
+    }
+  }
+
+  private calculateRank(elo: number): Rank {
+    const ranks: Rank[] = ['Legend', 'Grandmaster', 'King', 'Queen', 'Rook', 'Bishop', 'Knight', 'Pawn'];
     
-    // Update game stats
-    player.totalGames++;
-    player.lastActive = Date.now();
-    player.totalEarnings += earnings;
-    player.totalSpent += spent;
-    
-    if (result === 'win') {
-      player.wins++;
-      player.winStreak++;
-      player.bestWinStreak = Math.max(player.bestWinStreak, player.winStreak);
-    } else if (result === 'loss') {
-      player.losses++;
-      player.winStreak = 0;
-    } else {
-      player.draws++;
-      player.winStreak = 0;
+    for (const rank of ranks) {
+      if (elo >= this.rankThresholds[rank]) {
+        return rank;
+      }
     }
     
-    // Update ELO
-    const eloChange = this.calculateEloChange(player.elo, opponentElo, result);
-    player.elo = Math.max(0, player.elo + eloChange);
-    
-    // Update rank
-    player.currentRank = this.getRankFromElo(player.elo, player.totalGames);
-    player.rankProgress = this.calculateRankProgress(player.elo, player.totalGames);
-    
-    // Check achievements
-    const newAchievements = this.checkAchievements(player);
-    player.achievements.push(...newAchievements);
-    
-    this.savePlayerRank(player);
-    
-    // Update tournament if active
-    this.updateTournamentStats(publicKey, player);
-    
-    return {
-      player,
-      newAchievements,
-      rankUp: oldRank !== player.currentRank
+    return 'Pawn';
+  }
+
+  private getRankLevel(rank: Rank): number {
+    const levels = {
+      'Pawn': 1,
+      'Knight': 2,
+      'Bishop': 3,
+      'Rook': 4,
+      'Queen': 5,
+      'King': 6,
+      'Grandmaster': 7,
+      'Legend': 8
     };
+    return levels[rank];
   }
 
-  private getAllRankings(): Record<string, PlayerRank> {
-    const data = safeLocalStorage.getItem(this.STORAGE_KEY);
-    return data ? safeJSONParse(data, {}) : {};
+  getRankColor(rank: Rank): string {
+    return this.rankColors[rank];
   }
 
-  private savePlayerRank(player: PlayerRank): void {
-    const rankings = this.getAllRankings();
-    rankings[player.publicKey] = player;
-    const data = safeJSONStringify(rankings);
-    if (data) {
-      safeLocalStorage.setItem(this.STORAGE_KEY, data);
+  getLeaderboard(limit: number = 50): any[] {
+    try {
+      // Try to get from cache first
+      const cachedData = safeLocalStorage.getItem(this.LEADERBOARD_STORAGE_KEY);
+      if (cachedData) {
+        const cached = safeJSONParse(cachedData, []);
+        if (cached.length > 0) {
+          return cached.slice(0, limit);
+        }
+      }
+
+      // Fallback to generating from all players
+      const allPlayers = this.getAllPlayers();
+      const leaderboard = allPlayers
+        .filter(p => p.gamesPlayed > 0)
+        .sort((a, b) => b.elo - a.elo)
+        .slice(0, limit)
+        .map((player, index) => ({
+          rank: index + 1,
+          publicKey: player.publicKey,
+          currentRank: player.currentRank,
+          elo: player.elo,
+          wins: player.wins,
+          losses: player.losses,
+          winStreak: player.winStreak,
+          gamesPlayed: player.gamesPlayed,
+          totalEarnings: player.totalEarnings,
+          lastActive: player.lastActive
+        }));
+
+      return leaderboard;
+    } catch (error) {
+      console.error('Error getting leaderboard:', error);
+      return [];
     }
   }
 
-  getLeaderboard(limit: number = 100): PlayerRank[] {
-    const rankings = this.getAllRankings();
-    return Object.values(rankings)
-      .sort((a, b) => b.elo - a.elo)
-      .slice(0, limit);
+  getPlayerRanking(publicKey: string): number {
+    try {
+      const leaderboard = this.getLeaderboard(1000); // Get more for accurate ranking
+      const playerIndex = leaderboard.findIndex(p => p.publicKey === publicKey);
+      return playerIndex >= 0 ? playerIndex + 1 : -1;
+    } catch (error) {
+      console.error('Error getting player ranking:', error);
+      return -1;
+    }
   }
 
-  // Tournament System
+  getAchievementInfo(achievementId: string): Achievement | null {
+    return this.achievements.find(a => a.id === achievementId) || null;
+  }
+
+  getAllAchievements(): Achievement[] {
+    return this.achievements;
+  }
+
+  // Tournament system methods
   getCurrentTournament(): AnnualTournament | null {
-    const tournaments = this.getAllTournaments();
-    const currentYear = this.getCurrentYear();
-    return tournaments[currentYear] || null;
+    try {
+      const tournamentsData = safeLocalStorage.getItem(this.TOURNAMENTS_STORAGE_KEY);
+      const tournaments = tournamentsData ? safeJSONParse(tournamentsData, {}) : {};
+      
+      const currentYear = new Date().getFullYear();
+      return tournaments[currentYear] || null;
+    } catch (error) {
+      console.error('Error getting current tournament:', error);
+      return null;
+    }
   }
 
   initializeAnnualTournament(): AnnualTournament {
-    const currentYear = this.getCurrentYear();
-    const startDate = new Date(currentYear, 0, 1).getTime(); // January 1st
-    const endDate = new Date(currentYear, 11, 31, 23, 59, 59).getTime(); // December 31st
-    
-    const tournament: AnnualTournament = {
-      year: currentYear,
-      startDate,
-      endDate,
-      participants: [],
-      mysteryPrizes: {
-        first: MYSTERY_PRIZES[Math.floor(Math.random() * MYSTERY_PRIZES.length)],
-        second: MYSTERY_PRIZES[Math.floor(Math.random() * MYSTERY_PRIZES.length)],
-        third: MYSTERY_PRIZES[Math.floor(Math.random() * MYSTERY_PRIZES.length)]
-      },
-      isActive: true
-    };
-    
-    this.saveTournament(tournament);
-    return tournament;
-  }
-
-  private updateTournamentStats(publicKey: string, player: PlayerRank): void {
-    let tournament = this.getCurrentTournament();
-    if (!tournament) {
-      tournament = this.initializeAnnualTournament();
-    }
-    
-    const participantIndex = tournament.participants.findIndex(p => p.publicKey === publicKey);
-    
-    if (participantIndex >= 0) {
-      // Update existing participant
-      tournament.participants[participantIndex] = {
-        publicKey,
-        username: player.username,
-        finalElo: player.elo,
-        totalWins: player.wins,
-        totalEarnings: player.totalEarnings,
-        rank: 0 // Will be calculated when tournament ends
+    try {
+      const currentYear = new Date().getFullYear();
+      const startDate = new Date(currentYear, 0, 1).getTime(); // January 1st
+      const endDate = new Date(currentYear, 11, 31, 23, 59, 59).getTime(); // December 31st
+      
+      const tournament: AnnualTournament = {
+        year: currentYear,
+        startDate,
+        endDate,
+        participants: [],
+        mysteryPrizes: {
+          first: MYSTERY_PRIZES[Math.floor(Math.random() * MYSTERY_PRIZES.length)],
+          second: MYSTERY_PRIZES[Math.floor(Math.random() * MYSTERY_PRIZES.length)],
+          third: MYSTERY_PRIZES[Math.floor(Math.random() * MYSTERY_PRIZES.length)]
+        },
+        isActive: true
       };
-    } else {
-      // Add new participant
-      tournament.participants.push({
-        publicKey,
-        username: player.username,
-        finalElo: player.elo,
-        totalWins: player.wins,
-        totalEarnings: player.totalEarnings,
-        rank: 0
-      });
-    }
-    
-    this.saveTournament(tournament);
-  }
-
-  finalizeTournament(year: number): AnnualTournament | null {
-    const tournaments = this.getAllTournaments();
-    const tournament = tournaments[year];
-    
-    if (!tournament) return null;
-    
-    // Sort participants by ELO, then by wins, then by earnings
-    tournament.participants.sort((a, b) => {
-      if (b.finalElo !== a.finalElo) return b.finalElo - a.finalElo;
-      if (b.totalWins !== a.totalWins) return b.totalWins - a.totalWins;
-      return b.totalEarnings - a.totalEarnings;
-    });
-    
-    // Assign ranks and mystery prizes
-    tournament.participants.forEach((participant, index) => {
-      participant.rank = index + 1;
       
-      if (index === 0) {
-        participant.mysteryPrizeWon = tournament.mysteryPrizes.first;
-        // Award achievement
-        const player = this.getPlayerRank(participant.publicKey);
-        if (!player.achievements.includes('tournament_winner')) {
-          player.achievements.push('tournament_winner');
-          this.savePlayerRank(player);
-        }
-      } else if (index === 1) {
-        participant.mysteryPrizeWon = tournament.mysteryPrizes.second;
-      } else if (index === 2) {
-        participant.mysteryPrizeWon = tournament.mysteryPrizes.third;
+      const tournamentsData = safeLocalStorage.getItem(this.TOURNAMENTS_STORAGE_KEY);
+      const tournaments = tournamentsData ? safeJSONParse(tournamentsData, {}) : {};
+      tournaments[currentYear] = tournament;
+      
+      const tournamentsDataStr = safeJSONStringify(tournaments);
+      if (tournamentsDataStr) {
+        safeLocalStorage.setItem(this.TOURNAMENTS_STORAGE_KEY, tournamentsDataStr);
       }
       
-      // Award mystery prize achievement
-      if (participant.mysteryPrizeWon) {
-        const player = this.getPlayerRank(participant.publicKey);
-        if (!player.achievements.includes('mystery_prize')) {
-          player.achievements.push('mystery_prize');
-          this.savePlayerRank(player);
-        }
-      }
-    });
-    
-    tournament.isActive = false;
-    this.saveTournament(tournament);
-    
-    return tournament;
-  }
-
-  private getAllTournaments(): Record<number, AnnualTournament> {
-    const data = safeLocalStorage.getItem(this.TOURNAMENT_KEY);
-    return data ? safeJSONParse(data, {}) : {};
-  }
-
-  private saveTournament(tournament: AnnualTournament): void {
-    const tournaments = this.getAllTournaments();
-    tournaments[tournament.year] = tournament;
-    const data = safeJSONStringify(tournaments);
-    if (data) {
-      safeLocalStorage.setItem(this.TOURNAMENT_KEY, data);
+      console.log(`🏆 Initialized ${currentYear} Annual Tournament`);
+      return tournament;
+    } catch (error) {
+      console.error('Error initializing tournament:', error);
+      return {
+        year: new Date().getFullYear(),
+        startDate: Date.now(),
+        endDate: Date.now() + 365 * 24 * 60 * 60 * 1000,
+        participants: [],
+        mysteryPrizes: {
+          first: 'Exclusive NFT Chess Set',
+          second: 'Custom Chess Board Skin', 
+          third: 'VIP Tournament Entry'
+        },
+        isActive: true
+      };
     }
   }
 
   getTournamentHistory(): AnnualTournament[] {
-    const tournaments = this.getAllTournaments();
-    return Object.values(tournaments).sort((a, b) => b.year - a.year);
+    try {
+      const tournamentsData = safeLocalStorage.getItem(this.TOURNAMENTS_STORAGE_KEY);
+      const tournaments = tournamentsData ? safeJSONParse(tournamentsData, {}) : {};
+      
+      return Object.values(tournaments).sort((a: any, b: any) => b.year - a.year);
+    } catch (error) {
+      console.error('Error getting tournament history:', error);
+      return [];
+    }
   }
 
-  getRankColor(rankName: string): string {
-    const rank = RANKS.find(r => r.name === rankName);
-    return rank?.color || '#8B4513';
+  // Get global statistics
+  getGlobalStats(): {
+    totalPlayers: number;
+    totalGames: number;
+    totalEarnings: number;
+    averageElo: number;
+    topPlayer: PlayerRank | null;
+  } {
+    try {
+      const allPlayers = this.getAllPlayers();
+      const activePlayers = allPlayers.filter(p => p.gamesPlayed > 0);
+      
+      const totalGames = activePlayers.reduce((sum, p) => sum + p.gamesPlayed, 0) / 2; // Divide by 2 since each game involves 2 players
+      const totalEarnings = activePlayers.reduce((sum, p) => sum + p.totalEarnings, 0);
+      const averageElo = activePlayers.length > 0 ? 
+        activePlayers.reduce((sum, p) => sum + p.elo, 0) / activePlayers.length : 1000;
+      
+      return {
+        totalPlayers: activePlayers.length,
+        totalGames: Math.floor(totalGames),
+        totalEarnings,
+        averageElo: Math.round(averageElo),
+        topPlayer: activePlayers.length > 0 ? activePlayers[0] : null
+      };
+    } catch (error) {
+      console.error('Error getting global stats:', error);
+      return {
+        totalPlayers: 0,
+        totalGames: 0,
+        totalEarnings: 0,
+        averageElo: 1000,
+        topPlayer: null
+      };
+    }
   }
 
-  getAchievementInfo(achievementId: string) {
-    return ACHIEVEMENTS.find(a => a.id === achievementId);
+  // Force sync all data (useful for cross-device compatibility)
+  syncGlobalData(): void {
+    try {
+      const allPlayers = this.getAllPlayers();
+      this.saveAllPlayers(allPlayers);
+      console.log('🔄 Global data synced successfully');
+    } catch (error) {
+      console.error('Error syncing global data:', error);
+    }
   }
 }
 
-export const rankingSystem = RankingSystem.getInstance();
+export const rankingSystem = new RankingSystem();
