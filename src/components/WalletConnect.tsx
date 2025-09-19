@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Wallet, ExternalLink, RefreshCw, CheckCircle, AlertCircle, Search } from 'lucide-react';
+import { Wallet, ExternalLink, RefreshCw, CheckCircle, AlertCircle, Search, Smartphone } from 'lucide-react';
 import { toast } from 'sonner';
 import { walletManager, WalletInfo, ConnectedWallet } from '@/lib/wallet-manager';
 import { SolanaGameManager, WalletState } from '@/lib/solana-integration';
@@ -21,6 +21,18 @@ export default function WalletConnect({ onWalletConnected, solanaManager }: Wall
   const [isLoadingBalance, setIsLoadingBalance] = useState(false);
   const [autoReconnectAttempted, setAutoReconnectAttempted] = useState(false);
   const [isDetectingWallets, setIsDetectingWallets] = useState(true);
+  const [isMobile, setIsMobile] = useState(false);
+
+  // Detect mobile device
+  useEffect(() => {
+    const checkMobile = () => {
+      setIsMobile(/Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || window.innerWidth <= 768);
+    };
+    
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+    return () => window.removeEventListener('resize', checkMobile);
+  }, []);
 
   useEffect(() => {
     // Initialize wallets
@@ -112,9 +124,24 @@ export default function WalletConnect({ onWalletConnected, solanaManager }: Wall
       toast.success(`Connected to ${walletName}!`);
     } catch (error: any) {
       console.error('Connection error:', error);
-      toast.error(error.message || `Failed to connect to ${walletName}`);
+      
+      if (error.message.includes('Redirecting to mobile app')) {
+        toast.info(`Opening ${walletName} mobile app...`);
+      } else {
+        toast.error(error.message || `Failed to connect to ${walletName}`);
+      }
     } finally {
       setIsConnecting(false);
+    }
+  };
+
+  const handleMobileWalletConnect = (wallet: WalletInfo) => {
+    if (wallet.deepLink) {
+      toast.info(`Opening ${wallet.name} app...`);
+      window.location.href = wallet.deepLink;
+    } else {
+      toast.info(`Please install ${wallet.name} from the app store`);
+      window.open(wallet.url, '_blank');
     }
   };
 
@@ -198,6 +225,7 @@ export default function WalletConnect({ onWalletConnected, solanaManager }: Wall
           <CardTitle className="flex items-center gap-2">
             <CheckCircle className="h-5 w-5 text-green-600" />
             Wallet Connected
+            {isMobile && <Smartphone className="h-4 w-4 text-blue-600" />}
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -210,7 +238,8 @@ export default function WalletConnect({ onWalletConnected, solanaManager }: Wall
                                             connectedWallet.name === 'Glow' ? '✨' : 
                                             connectedWallet.name === 'Coinbase Wallet' ? '🔵' : 
                                             connectedWallet.name === 'Trust Wallet' ? '🛡️' : 
-                                            connectedWallet.name === 'Slope' ? '📈' : '🔗'}</span>
+                                            connectedWallet.name === 'Slope' ? '📈' : 
+                                            connectedWallet.name === 'Torus' ? '🌐' : '🔗'}</span>
               </div>
               <div>
                 <div className="font-medium">{connectedWallet.name}</div>
@@ -260,6 +289,7 @@ export default function WalletConnect({ onWalletConnected, solanaManager }: Wall
 
           <div className="text-xs text-center text-gray-500">
             💾 Wallet stays connected across page refreshes
+            {isMobile && <div>📱 Mobile wallet connected</div>}
           </div>
         </CardContent>
       </Card>
@@ -272,6 +302,7 @@ export default function WalletConnect({ onWalletConnected, solanaManager }: Wall
         <CardTitle className="flex items-center gap-2">
           <Wallet className="h-5 w-5" />
           Connect Wallet
+          {isMobile && <Smartphone className="h-4 w-4 text-blue-600" />}
           {(isDetectingWallets || !autoReconnectAttempted) && (
             <div className="flex items-center gap-1 text-sm text-blue-600">
               <Search className="h-3 w-3 animate-pulse" />
@@ -309,7 +340,9 @@ export default function WalletConnect({ onWalletConnected, solanaManager }: Wall
                     <span className="text-2xl">{wallet.icon}</span>
                     <div className="text-left">
                       <div className="font-medium">{wallet.name}</div>
-                      <div className="text-xs text-gray-500">Click to connect</div>
+                      <div className="text-xs text-gray-500">
+                        {isMobile ? 'Tap to connect' : 'Click to connect'}
+                      </div>
                     </div>
                   </div>
                 </Button>
@@ -321,25 +354,31 @@ export default function WalletConnect({ onWalletConnected, solanaManager }: Wall
             <AlertCircle className="h-12 w-12 text-yellow-500 mx-auto mb-3" />
             <h3 className="font-medium mb-2">No Wallets Detected</h3>
             <p className="text-sm text-gray-600 mb-4">
-              {isDetectingWallets ? 'Still searching for wallets...' : 'Install a Solana wallet to get started:'}
+              {isDetectingWallets ? 'Still searching for wallets...' : 
+               isMobile ? 'Install a Solana wallet app to get started:' : 
+               'Install a Solana wallet extension to get started:'}
             </p>
             
             {!isDetectingWallets && (
               <>
                 <div className="space-y-2 mb-4">
-                  {allWallets.slice(0, 4).map((wallet) => (
+                  {allWallets.slice(0, isMobile ? 6 : 4).map((wallet) => (
                     <Button
                       key={wallet.name}
                       variant="outline"
                       size="sm"
-                      onClick={() => window.open(wallet.url, '_blank')}
+                      onClick={() => isMobile ? handleMobileWalletConnect(wallet) : window.open(wallet.url, '_blank')}
                       className="w-full justify-between"
                     >
                       <span className="flex items-center gap-2">
                         <span>{wallet.icon}</span>
                         {wallet.name}
                       </span>
-                      <ExternalLink className="h-3 w-3" />
+                      {isMobile ? (
+                        <Smartphone className="h-3 w-3" />
+                      ) : (
+                        <ExternalLink className="h-3 w-3" />
+                      )}
                     </Button>
                   ))}
                 </div>
@@ -357,7 +396,14 @@ export default function WalletConnect({ onWalletConnected, solanaManager }: Wall
             )}
             
             <div className="mt-4 text-xs text-gray-500">
-              After installing a wallet, refresh this page or click "Refresh Detection"
+              {isMobile ? (
+                <>
+                  📱 Tap wallet names above to open their mobile apps
+                  <div className="mt-1">After installing, return to this page to connect</div>
+                </>
+              ) : (
+                'After installing a wallet extension, refresh this page or click "Refresh Detection"'
+              )}
             </div>
           </div>
         )}
@@ -365,7 +411,9 @@ export default function WalletConnect({ onWalletConnected, solanaManager }: Wall
         {isConnecting && (
           <div className="text-center py-4">
             <RefreshCw className="h-6 w-6 animate-spin mx-auto mb-2" />
-            <div className="text-sm text-gray-600">Connecting to wallet...</div>
+            <div className="text-sm text-gray-600">
+              {isMobile ? 'Opening wallet app...' : 'Connecting to wallet...'}
+            </div>
           </div>
         )}
       </CardContent>
