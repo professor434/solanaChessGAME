@@ -1,359 +1,194 @@
-import { safeLocalStorage, safeJSONParse, safeJSONStringify } from './storage-utils';
-
 export interface WalletInfo {
   name: string;
   icon: string;
   url: string;
-  provider?: any;
+  adapter?: any;
+  deepLink?: string;
 }
 
 export interface ConnectedWallet {
   name: string;
   publicKey: string;
-  provider: any;
+  adapter?: any;
 }
 
 class WalletManager {
-  private readonly WALLET_STORAGE_KEY = 'solana_chess_connected_wallet';
-  private readonly WALLET_SESSION_KEY = 'solana_chess_wallet_session';
   private connectedWallet: ConnectedWallet | null = null;
-  private walletCheckInterval: any = null;
+  private detectionInterval: NodeJS.Timeout | null = null;
 
   private wallets: WalletInfo[] = [
     {
       name: 'Phantom',
       icon: '👻',
       url: 'https://phantom.app/',
-      provider: null
+      deepLink: 'https://phantom.app/ul/browse/https%3A//solana-chess-game.vercel.app%3Fref%3Dphantom'
     },
     {
       name: 'Solflare',
       icon: '🔥',
       url: 'https://solflare.com/',
-      provider: null
+      deepLink: 'https://solflare.com/ul/browse/https%3A//solana-chess-game.vercel.app%3Fref%3Dsolflare'
     },
     {
       name: 'Backpack',
       icon: '🎒',
       url: 'https://backpack.app/',
-      provider: null
+      deepLink: 'https://backpack.app/browse/https%3A//solana-chess-game.vercel.app%3Fref%3Dbackpack'
     },
     {
       name: 'Glow',
       icon: '✨',
       url: 'https://glow.app/',
-      provider: null
+      deepLink: 'https://glow.app/browse/https%3A//solana-chess-game.vercel.app%3Fref%3Dglow'
     },
     {
       name: 'Coinbase Wallet',
       icon: '🔵',
-      url: 'https://wallet.coinbase.com/',
-      provider: null
+      url: 'https://www.coinbase.com/wallet',
+      deepLink: 'https://go.cb-w.com/dapp?cb_url=https%3A//solana-chess-game.vercel.app%3Fref%3Dcoinbase'
     },
     {
       name: 'Trust Wallet',
       icon: '🛡️',
       url: 'https://trustwallet.com/',
-      provider: null
-    },
-    {
-      name: 'Slope',
-      icon: '📈',
-      url: 'https://slope.finance/',
-      provider: null
-    },
-    {
-      name: 'Sollet',
-      icon: '🔗',
-      url: 'https://www.sollet.io/',
-      provider: null
+      deepLink: 'https://link.trustwallet.com/open_url?coin_id=501&url=https%3A//solana-chess-game.vercel.app%3Fref%3Dtrust'
     }
   ];
 
   constructor() {
-    this.initializeWallets();
     this.startWalletDetection();
-    this.attemptAutoReconnect();
-  }
-
-  private initializeWallets() {
-    if (typeof window === 'undefined') return;
-
-    console.log('🔍 Detecting wallets...');
-    
-    // Check for wallet providers with multiple detection methods
-    this.wallets.forEach(wallet => {
-      switch (wallet.name) {
-        case 'Phantom':
-          wallet.provider = (window as any).phantom?.solana || (window as any).solana;
-          break;
-        case 'Solflare':
-          wallet.provider = (window as any).solflare || (window as any).SolflareApp;
-          break;
-        case 'Backpack':
-          wallet.provider = (window as any).backpack || (window as any).xnft?.solana;
-          break;
-        case 'Glow':
-          wallet.provider = (window as any).glow;
-          break;
-        case 'Coinbase Wallet':
-          wallet.provider = (window as any).coinbaseSolana || (window as any).coinbaseWalletExtension?.solana;
-          break;
-        case 'Trust Wallet':
-          wallet.provider = (window as any).trustwallet?.solana;
-          break;
-        case 'Slope':
-          wallet.provider = (window as any).Slope;
-          break;
-        case 'Sollet':
-          wallet.provider = (window as any).sollet;
-          break;
-      }
-    });
-
-    const detectedWallets = this.wallets.filter(w => w.provider);
-    console.log(`🔍 Detected ${detectedWallets.length} wallets:`, detectedWallets.map(w => w.name));
+    this.loadSavedConnection();
   }
 
   private startWalletDetection() {
-    // Check for new wallets every 2 seconds for the first 30 seconds
-    let attempts = 0;
-    const maxAttempts = 15;
+    this.detectWallets();
     
-    this.walletCheckInterval = setInterval(() => {
-      attempts++;
-      const previousCount = this.wallets.filter(w => w.provider).length;
-      
-      this.initializeWallets();
-      
-      const currentCount = this.wallets.filter(w => w.provider).length;
-      
-      if (currentCount > previousCount) {
-        console.log(`🔍 New wallets detected! Total: ${currentCount}`);
-        // Dispatch event to update UI
-        window.dispatchEvent(new CustomEvent('walletsUpdated'));
-      }
-      
-      if (attempts >= maxAttempts) {
-        clearInterval(this.walletCheckInterval);
-        console.log('🔍 Wallet detection completed');
-      }
+    this.detectionInterval = setInterval(() => {
+      this.detectWallets();
     }, 2000);
-  }
 
-  private async attemptAutoReconnect() {
-    if (typeof window === 'undefined') return;
-
-    try {
-      const storedWallet = safeLocalStorage.getItem(this.WALLET_STORAGE_KEY);
-      const sessionData = safeLocalStorage.getItem(this.WALLET_SESSION_KEY);
-      
-      if (!storedWallet || !sessionData) {
-        console.log('🔄 No stored wallet session found');
-        return;
-      }
-
-      const walletData = safeJSONParse(storedWallet, null);
-      const session = safeJSONParse(sessionData, null);
-      
-      if (!walletData || !session) {
-        console.log('🔄 Invalid stored wallet data');
-        this.clearStoredWallet();
-        return;
-      }
-
-      // Check if session is still valid (24 hours)
-      const sessionAge = Date.now() - session.timestamp;
-      const SESSION_TIMEOUT = 24 * 60 * 60 * 1000;
-      
-      if (sessionAge > SESSION_TIMEOUT) {
-        console.log('🔄 Wallet session expired');
-        this.clearStoredWallet();
-        return;
-      }
-
-      console.log(`🔄 Attempting to reconnect to ${walletData.name}...`);
-      
-      // Wait a bit for wallets to load, then try to reconnect
-      setTimeout(async () => {
-        try {
-          await this.reconnectStoredWallet(walletData);
-        } catch (error) {
-          console.error('🔄 Auto-reconnect failed:', error);
-          this.clearStoredWallet();
-        }
-      }, 3000);
-      
-    } catch (error) {
-      console.error('🔄 Auto-reconnect error:', error);
-      this.clearStoredWallet();
+    if (typeof window !== 'undefined') {
+      window.addEventListener('load', () => this.detectWallets());
+      document.addEventListener('DOMContentLoaded', () => this.detectWallets());
     }
   }
 
-  private async reconnectStoredWallet(walletData: any) {
-    const wallet = this.wallets.find(w => w.name === walletData.name);
-    if (!wallet?.provider) {
-      console.log(`🔄 ${walletData.name} provider not found`);
-      return;
-    }
-
-    try {
-      // Try to connect silently first
-      if (wallet.provider.isConnected) {
-        this.connectedWallet = {
-          name: walletData.name,
-          publicKey: wallet.provider.publicKey?.toString() || walletData.publicKey,
-          provider: wallet.provider
-        };
-        
-        this.updateWalletSession();
-        console.log(`✅ Auto-reconnected to ${walletData.name}`);
-        
-        // Dispatch reconnection event
-        window.dispatchEvent(new CustomEvent('walletAutoReconnected', {
-          detail: this.connectedWallet
-        }));
-        return;
-      }
-
-      // Try silent connection
-      if (wallet.provider.connect) {
-        await wallet.provider.connect({ onlyIfTrusted: true });
-        
-        if (wallet.provider.isConnected && wallet.provider.publicKey) {
-          this.connectedWallet = {
-            name: walletData.name,
-            publicKey: wallet.provider.publicKey.toString(),
-            provider: wallet.provider
-          };
-          
-          this.updateWalletSession();
-          console.log(`✅ Silently reconnected to ${walletData.name}`);
-          
-          // Dispatch reconnection event
-          window.dispatchEvent(new CustomEvent('walletAutoReconnected', {
-            detail: this.connectedWallet
-          }));
-        }
-      }
-    } catch (error) {
-      console.log(`🔄 Silent reconnection failed for ${walletData.name}:`, error);
+  private detectWallets() {
+    const availableWallets = this.getAvailableWallets();
+    
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('walletsUpdated', { 
+        detail: availableWallets 
+      }));
     }
   }
 
   getAvailableWallets(): WalletInfo[] {
-    return this.wallets.filter(wallet => wallet.provider);
+    const available: WalletInfo[] = [];
+    
+    if (typeof window === 'undefined') return available;
+
+    // Check for Phantom
+    if (window.solana && window.solana.isPhantom) {
+      const phantom = this.wallets.find(w => w.name === 'Phantom');
+      if (phantom) {
+        available.push({ ...phantom, adapter: window.solana });
+      }
+    }
+
+    // Check for Solflare
+    if (window.solflare && window.solflare.isSolflare) {
+      const solflare = this.wallets.find(w => w.name === 'Solflare');
+      if (solflare) {
+        available.push({ ...solflare, adapter: window.solflare });
+      }
+    }
+
+    // Check for Backpack
+    if (window.backpack && window.backpack.isBackpack) {
+      const backpack = this.wallets.find(w => w.name === 'Backpack');
+      if (backpack) {
+        available.push({ ...backpack, adapter: window.backpack });
+      }
+    }
+
+    // Check for Glow
+    if (window.glow) {
+      const glow = this.wallets.find(w => w.name === 'Glow');
+      if (glow) {
+        available.push({ ...glow, adapter: window.glow });
+      }
+    }
+
+    // Check for Coinbase Wallet
+    if (window.coinbaseSolana) {
+      const coinbase = this.wallets.find(w => w.name === 'Coinbase Wallet');
+      if (coinbase) {
+        available.push({ ...coinbase, adapter: window.coinbaseSolana });
+      }
+    }
+
+    // Check for Trust Wallet
+    if (window.trustwallet) {
+      const trust = this.wallets.find(w => w.name === 'Trust Wallet');
+      if (trust) {
+        available.push({ ...trust, adapter: window.trustwallet });
+      }
+    }
+
+    console.log(`🔍 Detected ${available.length} wallets:`, available.map(w => w.name));
+    return available;
   }
 
   getAllWallets(): WalletInfo[] {
-    return this.wallets;
+    return [...this.wallets];
   }
 
   async connectWallet(walletName: string): Promise<ConnectedWallet> {
-    const wallet = this.wallets.find(w => w.name === walletName);
+    const availableWallets = this.getAvailableWallets();
+    const wallet = availableWallets.find(w => w.name === walletName);
     
-    if (!wallet) {
-      throw new Error(`Wallet ${walletName} not supported`);
-    }
-
-    if (!wallet.provider) {
-      throw new Error(`${walletName} not installed. Please install it from ${wallet.url}`);
+    if (!wallet || !wallet.adapter) {
+      if (this.isMobile() && wallet) {
+        this.redirectToMobileWallet(wallet);
+        throw new Error(`${walletName} not installed. Redirecting to mobile app...`);
+      }
+      throw new Error(`${walletName} wallet not found or not installed`);
     }
 
     try {
       console.log(`🔗 Connecting to ${walletName}...`);
       
-      let response;
-      
-      // Handle different wallet connection methods
-      if (wallet.provider.connect) {
-        response = await wallet.provider.connect();
-      } else {
-        throw new Error(`${walletName} does not support connection`);
+      const response = await wallet.adapter.connect();
+
+      if (!response.publicKey) {
+        throw new Error('No public key returned from wallet');
       }
 
-      const publicKey = response?.publicKey?.toString() || wallet.provider.publicKey?.toString();
+      const publicKey = response.publicKey.toString();
       
-      if (!publicKey) {
-        throw new Error('Failed to get public key from wallet');
-      }
-
-      this.connectedWallet = {
+      const connectedWallet: ConnectedWallet = {
         name: walletName,
         publicKey,
-        provider: wallet.provider
+        adapter: wallet.adapter
       };
 
-      // Store wallet connection for persistence
-      this.storeWalletConnection();
+      this.connectedWallet = connectedWallet;
+      this.saveConnection(connectedWallet);
       
-      // Set up disconnect listener
-      if (wallet.provider.on) {
-        wallet.provider.on('disconnect', () => {
-          console.log('👋 Wallet disconnected');
-          this.connectedWallet = null;
-          this.clearStoredWallet();
-        });
-      }
-
-      console.log(`✅ Connected to ${walletName}: ${publicKey}`);
-      return this.connectedWallet;
+      console.log(`✅ Connected to ${walletName}:`, publicKey);
+      return connectedWallet;
+      
     } catch (error: any) {
       console.error(`❌ Failed to connect to ${walletName}:`, error);
       
-      if (error.message?.includes('User rejected')) {
-        throw new Error('Connection cancelled by user');
+      if (error.code === 4001) {
+        throw new Error('Connection rejected by user');
+      } else if (error.code === -32002) {
+        throw new Error('Connection request already pending');
+      } else {
+        throw new Error(error.message || `Failed to connect to ${walletName}`);
       }
-      
-      throw new Error(`Failed to connect to ${walletName}: ${error.message || 'Unknown error'}`);
-    }
-  }
-
-  private storeWalletConnection() {
-    if (!this.connectedWallet) return;
-
-    try {
-      const walletData = {
-        name: this.connectedWallet.name,
-        publicKey: this.connectedWallet.publicKey
-      };
-
-      const sessionData = {
-        timestamp: Date.now(),
-        userAgent: navigator.userAgent,
-        connected: true
-      };
-
-      safeLocalStorage.setItem(this.WALLET_STORAGE_KEY, safeJSONStringify(walletData) || '');
-      safeLocalStorage.setItem(this.WALLET_SESSION_KEY, safeJSONStringify(sessionData) || '');
-      
-      console.log('💾 Wallet connection stored for persistence');
-    } catch (error) {
-      console.error('Error storing wallet connection:', error);
-    }
-  }
-
-  private updateWalletSession() {
-    try {
-      const sessionData = {
-        timestamp: Date.now(),
-        userAgent: navigator.userAgent,
-        connected: true
-      };
-
-      safeLocalStorage.setItem(this.WALLET_SESSION_KEY, safeJSONStringify(sessionData) || '');
-    } catch (error) {
-      console.error('Error updating wallet session:', error);
-    }
-  }
-
-  private clearStoredWallet() {
-    try {
-      safeLocalStorage.removeItem(this.WALLET_STORAGE_KEY);
-      safeLocalStorage.removeItem(this.WALLET_SESSION_KEY);
-      console.log('🗑️ Cleared stored wallet data');
-    } catch (error) {
-      console.error('Error clearing stored wallet:', error);
     }
   }
 
@@ -361,20 +196,18 @@ class WalletManager {
     if (!this.connectedWallet) return;
 
     try {
-      console.log(`🔌 Disconnecting from ${this.connectedWallet.name}...`);
-      
-      if (this.connectedWallet.provider?.disconnect) {
-        await this.connectedWallet.provider.disconnect();
+      if (this.connectedWallet.adapter && this.connectedWallet.adapter.disconnect) {
+        await this.connectedWallet.adapter.disconnect();
       }
       
-      this.clearStoredWallet();
+      this.connectedWallet = null;
+      this.clearSavedConnection();
       
-      console.log(`✅ Disconnected from ${this.connectedWallet.name}`);
-      this.connectedWallet = null;
+      console.log('🔌 Wallet disconnected');
     } catch (error) {
-      console.error('❌ Error disconnecting wallet:', error);
+      console.error('Error disconnecting wallet:', error);
       this.connectedWallet = null;
-      this.clearStoredWallet();
+      this.clearSavedConnection();
     }
   }
 
@@ -382,54 +215,136 @@ class WalletManager {
     return this.connectedWallet;
   }
 
-  isWalletConnected(): boolean {
-    return this.connectedWallet !== null;
-  }
-
   async validateConnection(): Promise<boolean> {
-    if (!this.connectedWallet) return false;
+    if (!this.connectedWallet || !this.connectedWallet.adapter) {
+      return false;
+    }
 
     try {
-      if (this.connectedWallet.provider?.isConnected === false) {
-        console.log('🔄 Wallet provider disconnected, clearing session');
-        this.clearStoredWallet();
+      const isConnected = this.connectedWallet.adapter.isConnected || 
+                         this.connectedWallet.adapter.connected ||
+                         (this.connectedWallet.adapter.publicKey !== null);
+      
+      if (!isConnected) {
         this.connectedWallet = null;
+        this.clearSavedConnection();
         return false;
       }
 
-      this.updateWalletSession();
       return true;
     } catch (error) {
-      console.error('Error validating wallet connection:', error);
+      console.error('Error validating connection:', error);
+      this.connectedWallet = null;
+      this.clearSavedConnection();
       return false;
     }
   }
 
-  getStoredWalletInfo(): { name: string; publicKey: string } | null {
+  refreshWalletDetection(): void {
+    console.log('🔄 Refreshing wallet detection...');
+    this.detectWallets();
+  }
+
+  private isMobile(): boolean {
+    return /Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+           window.innerWidth <= 768;
+  }
+
+  private redirectToMobileWallet(wallet: WalletInfo): void {
+    if (!wallet.deepLink) {
+      window.open(wallet.url, '_blank');
+      return;
+    }
+
+    console.log(`📱 Redirecting to ${wallet.name} mobile app...`);
+    
+    window.location.href = wallet.deepLink;
+    
+    setTimeout(() => {
+      window.open(wallet.url, '_blank');
+    }, 2000);
+  }
+
+  private saveConnection(wallet: ConnectedWallet): void {
     try {
-      const storedWallet = safeLocalStorage.getItem(this.WALLET_STORAGE_KEY);
-      if (!storedWallet) return null;
-      
-      return safeJSONParse(storedWallet, null);
+      localStorage.setItem('connectedWallet', JSON.stringify({
+        name: wallet.name,
+        publicKey: wallet.publicKey
+      }));
     } catch (error) {
-      console.error('Error getting stored wallet info:', error);
-      return null;
+      console.error('Failed to save wallet connection:', error);
     }
   }
 
-  // Force refresh wallet detection
-  refreshWalletDetection() {
-    console.log('🔄 Forcing wallet detection refresh...');
-    this.initializeWallets();
-    window.dispatchEvent(new CustomEvent('walletsUpdated'));
+  private loadSavedConnection(): void {
+    try {
+      const saved = localStorage.getItem('connectedWallet');
+      if (saved) {
+        const { name, publicKey } = JSON.parse(saved);
+        
+        setTimeout(() => {
+          this.attemptAutoReconnect(name, publicKey);
+        }, 1000);
+      }
+    } catch (error) {
+      console.error('Failed to load saved connection:', error);
+    }
   }
 
-  // Cleanup
-  destroy() {
-    if (this.walletCheckInterval) {
-      clearInterval(this.walletCheckInterval);
+  private async attemptAutoReconnect(walletName: string, expectedPublicKey: string): Promise<void> {
+    try {
+      const availableWallets = this.getAvailableWallets();
+      const wallet = availableWallets.find(w => w.name === walletName);
+      
+      if (!wallet || !wallet.adapter) {
+        console.log(`❌ ${walletName} not available for auto-reconnect`);
+        return;
+      }
+
+      const response = await wallet.adapter.connect({ onlyIfTrusted: true });
+
+      if (response.publicKey && response.publicKey.toString() === expectedPublicKey) {
+        const connectedWallet: ConnectedWallet = {
+          name: walletName,
+          publicKey: expectedPublicKey,
+          adapter: wallet.adapter
+        };
+
+        this.connectedWallet = connectedWallet;
+        
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('walletAutoReconnected', { 
+            detail: connectedWallet 
+          }));
+        }
+        
+        console.log(`🔄 Auto-reconnected to ${walletName}`);
+      }
+    } catch (error) {
+      console.log(`❌ Auto-reconnect failed for ${walletName}:`, error);
+    }
+  }
+
+  private clearSavedConnection(): void {
+    try {
+      localStorage.removeItem('connectedWallet');
+    } catch (error) {
+      console.error('Failed to clear saved connection:', error);
+    }
+  }
+
+  destroy(): void {
+    if (this.detectionInterval) {
+      clearInterval(this.detectionInterval);
+      this.detectionInterval = null;
     }
   }
 }
 
 export const walletManager = new WalletManager();
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', () => {
+    walletManager.destroy();
+  });
+}
